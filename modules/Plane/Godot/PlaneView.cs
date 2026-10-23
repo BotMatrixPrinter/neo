@@ -7,15 +7,16 @@ namespace Neo.Plane;
 /// <summary>
 /// Godot side of the Plane module: draws the player's biplane (Models/biplane.glb) where its
 /// Core says, interpolated between the last two fixed steps, with toon shading, an ink
-/// outline, a propeller spinning with throttle and a faint smoke trail. No rules here.
+/// outline, a propeller spinning with throttle (blades at a cartoon rate that never aliases,
+/// a prop disc fading in with throttle; see <see cref="PropellerLook"/>) and a faint smoke
+/// trail. No rules here.
 /// Opened on its own (no module bound, e.g. by screenshot.sh) it runs a preview: its own
 /// Core fed a gentle banked circle, a sky, a light and a chase camera.
 /// </summary>
 public partial class PlaneView : Node3D, IModuleView
 {
     private const string ModelPath = "res://modules/Plane/Models/biplane.glb";
-    private const float IdleRevsPerSecond = 6f;
-    private const float FullRevsPerSecond = 30f;
+    private const float DiscForward = 0.1f; // the disc sits this far in front of the blades
 
     private static readonly Color Smoke = new(1f, 1f, 1f, 0.06f);
 
@@ -27,6 +28,10 @@ public partial class PlaneView : Node3D, IModuleView
     private Node3D _body = null!;
     private Node3D? _propeller;
     private Basis _propellerRest = Basis.Identity;
+    private readonly System.Collections.Generic.List<ShaderMaterial> _blades = new();
+    private Material? _bladeOutline;
+    private ShaderMaterial? _disc;
+    private MeshInstance3D? _discMesh;
     private CpuParticles3D? _smoke;
     private float _spin;
 
@@ -43,11 +48,21 @@ public partial class PlaneView : Node3D, IModuleView
         if (model != null)
         {
             _body.AddChild(model);
-            Toon(model, GD.Load<Shader>("res://modules/Plane/Godot/Toon.gdshader"),
-                new ShaderMaterial { Shader = GD.Load<Shader>("res://modules/Plane/Godot/Outline.gdshader") });
+            var outline = new ShaderMaterial { Shader = GD.Load<Shader>("res://modules/Plane/Godot/Outline.gdshader") };
             _propeller = model.FindChild("Propeller", true, false) as Node3D;
             if (_propeller != null)
+            {
                 _propellerRest = _propeller.Basis;
+                _bladeOutline = outline;
+                Toon(_propeller, GD.Load<Shader>("res://modules/Plane/Godot/ToonFade.gdshader"), outline, _blades);
+            }
+            else
+            {
+                GD.PushWarning("PlaneView: biplane.glb has no Propeller node; no propeller spins");
+            }
+            Toon(model, GD.Load<Shader>("res://modules/Plane/Godot/Toon.gdshader"), outline, null);
+            if (_propeller != null)
+                _propeller.AddChild(_discMesh = MakeDisc(out _disc));
             var exhaust = model.FindChild("Exhaust", true, false) as Node3D;
             if (exhaust == null)
                 GD.PushWarning("PlaneView: biplane.glb has no Exhaust node; smoke starts at the plane's center");
@@ -82,10 +97,22 @@ public partial class PlaneView : Node3D, IModuleView
             _smoke.Emitting = true;
 
         float throttle = Mathf.Clamp(Mathf.Lerp(previous.Throttle, latest.Throttle, f), 0f, 1f);
-        float revs = Mathf.Lerp(IdleRevsPerSecond, FullRevsPerSecond, throttle);
-        _spin = Mathf.Wrap(_spin + Mathf.Tau * revs * (float)delta, 0f, Mathf.Tau);
+        _spin = Mathf.Wrap(_spin + Mathf.Tau * PropellerLook.BladeTurns(throttle, delta), 0f, Mathf.Tau);
         if (_propeller != null)
-            _propeller.Basis = _propellerRest * new Basis(Vector3.Back, _spin);
+        {
+            var axis = PropellerLook.SpinAxis;
+            _propeller.Basis = _propellerRest * new Basis(new Vector3(axis.X, axis.Y, axis.Z), _spin);
+            float bladeAlpha = PropellerLook.BladeAlpha(throttle);
+            foreach (var blade in _blades)
+            {
+                blade.SetShaderParameter("alpha", bladeAlpha);
+                blade.NextPass = bladeAlpha >= 0.999f ? _bladeOutline : null; // the ink outline only on solid blades
+            }
+            float discAlpha = PropellerLook.DiscAlpha(throttle);
+            _disc?.SetShaderParameter("fade", discAlpha);
+            if (_discMesh != null)
+                _discMesh.Visible = discAlpha > 0.001f;
+        }
 
         if (_previewCamera != null)
         {
@@ -114,10 +141,12 @@ public partial class PlaneView : Node3D, IModuleView
         return document.GenerateScene(state) as Node3D;
     }
 
-    // Every surface gets the cel shader in its own color, with the ink outline as next pass.
-    private static void Toon(Node node, Shader toon, Material outline)
+    // Every surface gets the cel shader in its own color, with the ink outline as next pass;
+    // surfaces that already have a material (the propeller's) are left alone. Collects the
+    // materials made into `made` when given.
+    private static void Toon(Node node, Shader toon, Material outline, System.Collections.Generic.List<ShaderMaterial>? made)
     {
-        if (node is MeshInstance3D instance && instance.Mesh != null)
+        if (node is MeshInstance3D instance && instance.Mesh != null && instance.GetSurfaceOverrideMaterial(0) == null)
         {
             instance.CastShadow = GeometryInstance3D.ShadowCastingSetting.Off;
             for (int s = 0; s < instance.Mesh.GetSurfaceCount(); s++)
@@ -126,10 +155,28 @@ public partial class PlaneView : Node3D, IModuleView
                 var material = new ShaderMaterial { Shader = toon, NextPass = outline };
                 material.SetShaderParameter("albedo", color);
                 instance.SetSurfaceOverrideMaterial(s, material);
+                made?.Add(material);
             }
         }
         foreach (var child in node.GetChildren())
-            Toon(child, toon, outline);
+            Toon(child, toon, outline, made);
+    }
+
+    // The prop disc: a thin round mesh just in front of the blades, facing along the shaft,
+    // semi-transparent with soft radial streaks, no outline. Turns with the propeller.
+    private static MeshInstance3D MakeDisc(out ShaderMaterial material)
+    {
+        material = new ShaderMaterial { Shader = GD.Load<Shader>("res://modules/Plane/Godot/PropDisc.gdshader"), RenderPriority = 1 };
+        material.SetShaderParameter("radius", 1.42f);
+        return new MeshInstance3D
+        {
+            Name = "PropDisc",
+            Mesh = new CylinderMesh { TopRadius = 1.42f, BottomRadius = 1.42f, Height = 0.01f, RadialSegments = 48, Rings = 1, CapBottom = false, Material = material },
+            // The cylinder's axis is its Y: turn it onto the shaft (local Z), a little forward (-Z).
+            Transform = new Transform3D(new Basis(Vector3.Right, Mathf.Pi / 2f), new Vector3(0f, 0f, -DiscForward)),
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+            Visible = false,
+        };
     }
 
     // Faint white puffs left in the world behind the exhaust, swelling and fading.
