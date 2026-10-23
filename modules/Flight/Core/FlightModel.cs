@@ -41,6 +41,16 @@ public sealed class FlightModel
 
     public const float MaxAimBank = 75f * Deg;
 
+    /// <summary>Sticks inside this (each of pitch, roll, yaw) count as hands off.</summary>
+    public const float HandsOffDeadZone = 0.05f;
+    /// <summary>Hands off this long (s) before the plane starts levelling itself.</summary>
+    public const float HandsOffDelay = 0.25f;
+    /// <summary>Time constant (s) of the hands-off levelling: the bank and climb left shrink by e each this long.</summary>
+    public const float LevelTimeConstant = 0.6f;
+    /// <summary>Largest stick the levelling uses for roll and pitch, so it stays gentle from far off level.</summary>
+    public const float LevelMaxRoll = 0.5f;
+    public const float LevelMaxPitch = 0.6f;
+
     private const float Deg = MathF.PI / 180f;
 
     private Vector3 _position = new(0f, 400f, 0f);
@@ -48,6 +58,7 @@ public sealed class FlightModel
     private float _speed = CruiseSpeed;
     private float _throttle = CruiseThrottle;
     private float _pitchCmd, _rollCmd, _yawCmd;
+    private float _handsOffTime;
 
     public int PlaneId { get; }
 
@@ -76,11 +87,17 @@ public sealed class FlightModel
     {
         Vector3 forward = Vector3.Transform(-Vector3.UnitZ, _orientation);
 
+        bool handsOff = !input.HasAim && MathF.Abs(input.Pitch) < HandsOffDeadZone
+            && MathF.Abs(input.Roll) < HandsOffDeadZone && MathF.Abs(input.Yaw) < HandsOffDeadZone;
+        _handsOffTime = handsOff ? _handsOffTime + dt : 0f;
+
         float pitch, roll, yaw;
         if (GuardDirection(forward, out Vector3 guard))
             Steer(guard, out pitch, out roll, out yaw);
         else if (input.HasAim)
             Steer(input.AimDirection, out pitch, out roll, out yaw);
+        else if (_handsOffTime >= HandsOffDelay)
+            Level(out pitch, out roll, out yaw);
         else
         {
             pitch = input.Pitch;
@@ -151,6 +168,28 @@ public sealed class FlightModel
         float rise = low ? 0.35f : Math.Clamp(forward.Y, -0.3f, 0.3f);
         direction = Vector3.Normalize(horizontal + new Vector3(0f, rise, 0f));
         return true;
+    }
+
+    /// <summary>
+    /// Hands-off levelling: roll back to wings level the shorter way and ease the nose back to
+    /// the horizon, each at a rate proportional to what is left (so it slows near level and
+    /// does not overshoot). Pitch waits for the wings to be within 90 degrees of level and
+    /// grows as they come level. Heading is kept: no yaw.
+    /// </summary>
+    private void Level(out float pitch, out float roll, out float yaw)
+    {
+        Vector3 forward = Vector3.Transform(-Vector3.UnitZ, _orientation);
+        Vector3 right = Vector3.Transform(Vector3.UnitX, _orientation);
+        Vector3 up = Vector3.Transform(Vector3.UnitY, _orientation);
+
+        float bank = MathF.Atan2(-right.Y, up.Y); // positive: rolled right; -pi..pi, so -bank is the shorter way
+        roll = Math.Clamp(-bank / (LevelTimeConstant * RollRate), -LevelMaxRoll, LevelMaxRoll);
+
+        // Body pitch that puts the nose on the horizon, the smaller of the two ways (|angle| <= 90 degrees).
+        float toHorizon = MathF.Atan2(-forward.Y * (up.Y < 0f ? -1f : 1f), MathF.Abs(up.Y));
+        float wingsLevel = MathF.Max(0f, MathF.Cos(bank));
+        pitch = Math.Clamp(toHorizon / (LevelTimeConstant * PitchRate), -LevelMaxPitch, LevelMaxPitch) * wingsLevel;
+        yaw = 0f;
     }
 
     /// <summary>

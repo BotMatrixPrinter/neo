@@ -184,6 +184,182 @@ public class FlightModuleTests
         Assert.True(Vector3.Transform(Vector3.UnitX, rolled.Orientation).Y < -0.3f, "roll right drops the right wing");
     }
 
+    private static float Bank(in PlaneState s)
+    {
+        Vector3 right = Vector3.Transform(Vector3.UnitX, s.Orientation);
+        Vector3 up = Vector3.Transform(Vector3.UnitY, s.Orientation);
+        return MathF.Atan2(-right.Y, up.Y); // positive: rolled right
+    }
+
+    private static float Climb(in PlaneState s) => MathF.Asin(Math.Clamp(Forward(s).Y, -1f, 1f));
+
+    private static float Heading(in PlaneState s)
+    {
+        Vector3 f = Forward(s);
+        return MathF.Atan2(f.X, -f.Z);
+    }
+
+    /// <summary>Holds <paramref name="input"/> until <paramref name="until"/> is true (at most 5 s).</summary>
+    private static PlaneState FlyUntil(Rig rig, ControlInput input, Func<PlaneState, bool> until)
+    {
+        for (int i = 0; i < 300; i++)
+        {
+            var s = rig.Step(input);
+            if (until(s))
+                return s;
+        }
+        throw new InvalidOperationException("never reached");
+    }
+
+    [Fact]
+    public void HandsOff_BankedPlaneRollsWingsLevelSmoothlyIn2To3Seconds()
+    {
+        foreach (float side in new[] { 1f, -1f })
+        {
+            var rig = new Rig();
+            FlyUntil(rig, Sticks(roll: side), s => MathF.Abs(Bank(s)) > 34f * Deg);
+            float peak = 0f, previous = 0f, settledAt = float.NaN, t = 0f;
+            bool falling = false;
+            rig.Fly(Sticks(), 5f, s =>
+            {
+                t += (float)Dt;
+                float bank = Bank(s) * side;
+                Assert.True(bank > -0.5f * Deg, $"overshot level: {bank / Deg} deg");
+                if (falling)
+                    Assert.True(bank <= previous + 0.01f * Deg, $"wobbled: {previous / Deg} -> {bank / Deg} deg");
+                else if (bank < previous)
+                    falling = true;
+                peak = MathF.Max(peak, bank);
+                previous = bank;
+                if (float.IsNaN(settledAt) && falling && bank < 2f * Deg)
+                    settledAt = t;
+            });
+            Assert.InRange(peak / Deg, 40f, 52f); // about a 45 degree bank
+            Assert.InRange(settledAt, 1.5f, 3f);
+            Assert.True(MathF.Abs(Bank(rig.Bus.Last)) < 0.5f * Deg);
+            Assert.True(MathF.Abs(Climb(rig.Bus.Last)) < 1f * Deg);
+            // Level now: no more turning, the heading holds.
+            float heading = Heading(rig.Bus.Last);
+            rig.Fly(Sticks(), 3f);
+            Assert.True(MathF.Abs(Heading(rig.Bus.Last) - heading) < 0.5f * Deg);
+        }
+    }
+
+    [Fact]
+    public void HandsOff_ClimbOrDiveEasesBackToTheHorizonKeepingHeading()
+    {
+        foreach (float side in new[] { 1f, -1f })
+        {
+            var rig = new Rig();
+            float heading = Heading(FlyUntil(rig, Sticks(pitch: side), s => MathF.Abs(Climb(s)) > 25f * Deg));
+            float peak = 0f, previous = 0f, settledAt = float.NaN, t = 0f;
+            bool falling = false;
+            rig.Fly(Sticks(), 5f, s =>
+            {
+                t += (float)Dt;
+                float climb = Climb(s) * side;
+                Assert.True(climb > -0.5f * Deg, $"overshot the horizon: {climb / Deg} deg");
+                if (falling)
+                    Assert.True(climb <= previous + 0.01f * Deg, $"wobbled: {previous / Deg} -> {climb / Deg} deg");
+                else if (climb < previous)
+                    falling = true;
+                peak = MathF.Max(peak, climb);
+                previous = climb;
+                if (float.IsNaN(settledAt) && falling && climb < 2f * Deg)
+                    settledAt = t;
+                Assert.True(MathF.Abs(Heading(s) - heading) < 0.5f * Deg, "heading kept");
+                Assert.True(MathF.Abs(Bank(s)) < 0.5f * Deg, "wings stay level");
+            });
+            Assert.InRange(peak / Deg, 28f, 35f); // about a 30 degree climb or dive
+            Assert.InRange(settledAt, 1.5f, 3f);
+            Assert.True(MathF.Abs(Climb(rig.Bus.Last)) < 0.5f * Deg);
+        }
+    }
+
+    [Fact]
+    public void HandsOff_WaitsAShortMomentAndCountsTinySticksAsHandsOff()
+    {
+        var rig = new Rig();
+        float climb = Climb(FlyUntil(rig, Sticks(pitch: 1f), s => Climb(s) > 25f * Deg));
+        // For the first 0.2 s after letting go nothing pulls the nose down (it even rises a bit with the stick's lag).
+        Assert.True(Climb(rig.Fly(Sticks(), 0.2f)) >= climb);
+        // Sticks inside the dead zone are hands off: it levels.
+        var s = rig.Fly(Sticks(pitch: 0.03f, roll: -0.04f, yaw: 0.04f), 4f);
+        Assert.True(MathF.Abs(Climb(s)) < 1f * Deg);
+        Assert.True(MathF.Abs(Bank(s)) < 1f * Deg);
+    }
+
+    [Fact]
+    public void AnyInputOverridesLevellingAtOnce_ThenItResumes()
+    {
+        var rig = new Rig();
+        FlyUntil(rig, Sticks(roll: 1f), s => Bank(s) > 40f * Deg);
+        float bank = Bank(rig.Fly(Sticks(), 0.5f)); // levelling under way
+        Assert.True(bank < 40f * Deg);
+
+        // Rolling further right: the stick wins at the usual roll rate.
+        var s = rig.Fly(Sticks(roll: 1f), 0.3f);
+        Assert.True(Bank(s) > bank + 30f * Deg, $"{bank / Deg} -> {Bank(s) / Deg} deg");
+
+        // A small stick just outside the dead zone holds the plane off level for as long as it is held.
+        rig.Fly(Sticks(pitch: 0.06f), 3f, p => Assert.True(Bank(p) > bank, "no levelling while a stick is held"));
+
+        // Let go: it levels again.
+        s = rig.Fly(Sticks(), 4f);
+        Assert.True(MathF.Abs(Bank(s)) < 1f * Deg);
+        Assert.True(MathF.Abs(Climb(s)) < 1f * Deg);
+
+        // Mouse aim is never levelled: it keeps a climb aimed at.
+        rig = new Rig();
+        var aim = Vector3.Normalize(new Vector3(0f, 0.5f, -1f));
+        s = rig.Fly(Aim(aim), 8f);
+        Assert.True(AngleBetween(Forward(s), aim) < 3f * Deg);
+    }
+
+    [Theory]
+    [InlineData(1f)]
+    [InlineData(-1f)]
+    public void HandsOff_InvertedRightsItselfTheShorterWay(float side)
+    {
+        var rig = new Rig();
+        // Rolled past 135 degrees: the shorter way back is the way it came.
+        FlyUntil(rig, Sticks(roll: side), s => Bank(s) * side > 135f * Deg);
+        float previous = Bank(rig.Bus.Last);
+        rig.Fly(Sticks(), 6f, s =>
+        {
+            float bank = Bank(s);
+            Assert.True(MathF.Abs(bank - previous) < 10f * Deg, "never rolls through inverted the long way");
+            Assert.True(bank * side > -0.5f * Deg, "no overshoot past wings level");
+            previous = bank;
+        });
+        var end = rig.Bus.Last;
+        Assert.True(Vector3.Transform(Vector3.UnitY, end.Orientation).Y > 0.999f, "upright");
+        Assert.True(MathF.Abs(Climb(end)) < 1f * Deg);
+        Assert.True(end.Position.Y > FlightModel.FloorAltitude + FlightModel.FloorMargin);
+    }
+
+    [Fact]
+    public void HandsOff_RecoversFromASteepDiveAboveTheFloor()
+    {
+        // Steep dive (about 70 degrees nose down) from 400 m, then hands off.
+        var rig = new Rig();
+        FlyUntil(rig, Sticks(pitch: -1f, throttle: 1f), s => Climb(s) < -70f * Deg);
+        float lowest = float.MaxValue;
+        var s = rig.Fly(Sticks(throttle: 1f), 6f, p => lowest = MathF.Min(lowest, p.Position.Y));
+        Assert.True(lowest > 250f, $"pulled out by itself, well above the floor guard ({lowest} m)");
+        Assert.True(MathF.Abs(Climb(s)) < 1f * Deg);
+
+        // Inverted steep dive held into the floor guard, then let go: the floor still wins, then it levels.
+        rig = new Rig();
+        rig.Fly(Sticks(roll: 1f), 1f);
+        rig.Fly(Sticks(pitch: 1f, throttle: 1f), 3f);
+        lowest = float.MaxValue;
+        s = rig.Fly(Sticks(throttle: 1f), 12f, p => lowest = MathF.Min(lowest, p.Position.Y));
+        Assert.True(lowest > FlightModel.FloorAltitude + 1f, $"at {lowest} m");
+        Assert.True(MathF.Abs(Bank(s)) < 1f * Deg, $"bank {Bank(s) / Deg} climb {Climb(s) / Deg} at {s.Position}");
+        Assert.True(MathF.Abs(Climb(s)) < 1f * Deg);
+    }
+
     [Fact]
     public void FloorHolds_PullsUpGentlyFromDives()
     {
