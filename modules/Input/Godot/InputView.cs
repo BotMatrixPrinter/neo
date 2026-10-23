@@ -11,7 +11,6 @@ namespace Neo.Input;
 /// </summary>
 public partial class InputView : Control, IModuleView
 {
-    private const float Deadzone = 0.15f;
     private const int MaxPads = 4;
 
     /// <summary>W nose up, S nose down instead of the default (see <see cref="InputModule.DefaultInvertPitch"/>).</summary>
@@ -37,7 +36,7 @@ public partial class InputView : Control, IModuleView
             case InputEventKey { Pressed: true }:
                 _usingPad = false;
                 break;
-            case InputEventJoypadMotion motion when Mathf.Abs(motion.AxisValue) > Deadzone:
+            case InputEventJoypadMotion motion when GamepadFlight.DeadZone(motion.AxisValue) != 0:
             case InputEventJoypadButton { Pressed: true }:
                 _usingPad = true;
                 break;
@@ -76,22 +75,22 @@ public partial class InputView : Control, IModuleView
     {
         for (int pad = 0; pad < MaxPads; pad++)
         {
-            float x = Axis(pad, JoyAxis.LeftX);
-            float y = Axis(pad, JoyAxis.LeftY);
-            float leftTrigger = Axis(pad, JoyAxis.TriggerLeft);
-            float rightTrigger = Axis(pad, JoyAxis.TriggerRight);
-            bool a = Godot.Input.IsJoyButtonPressed(pad, JoyButton.A); // A on Xbox, Cross on PlayStation
-            if (x == 0 && y == 0 && leftTrigger == 0 && rightTrigger == 0 && !a)
-                continue;
-            // Stick back (down, +Y in Godot) = nose up, like a real control column.
-            return new DeviceState(y, x, 0f, rightTrigger, leftTrigger, a || rightTrigger > 0.5f);
+            var state = new PadState
+            {
+                LeftX = Godot.Input.GetJoyAxis(pad, JoyAxis.LeftX),
+                LeftY = Godot.Input.GetJoyAxis(pad, JoyAxis.LeftY),
+                RightX = Godot.Input.GetJoyAxis(pad, JoyAxis.RightX),
+                RightY = Godot.Input.GetJoyAxis(pad, JoyAxis.RightY),
+                LeftTrigger = Godot.Input.GetJoyAxis(pad, JoyAxis.TriggerLeft),
+                RightTrigger = Godot.Input.GetJoyAxis(pad, JoyAxis.TriggerRight),
+                // Godot names buttons by Xbox position: A = Cross, X = Square, B = Circle.
+                A = Godot.Input.IsJoyButtonPressed(pad, JoyButton.A),
+                X = Godot.Input.IsJoyButtonPressed(pad, JoyButton.X),
+                B = Godot.Input.IsJoyButtonPressed(pad, JoyButton.B),
+            };
+            if (GamepadFlight.HasInput(state))
+                return GamepadFlight.Map(state);
         }
         return default;
-    }
-
-    private static float Axis(int pad, JoyAxis axis)
-    {
-        float value = Godot.Input.GetJoyAxis(pad, axis);
-        return Mathf.Abs(value) > Deadzone ? value : 0f;
     }
 }

@@ -84,7 +84,7 @@ public class InputModuleTests
     }
 
     [Fact]
-    public void AnalogTriggerScalesRate()
+    public void PartialThrottleInputScalesRate()
     {
         var input = new InputModule();
         input.Start(new FakeBus());
@@ -274,6 +274,39 @@ public class InputModuleTests
         input.SetKeys(new KeyState { W = true, S = true });
         Run(input, 60);
         Assert.Equal(0.45f, input.Throttle, 4);
+    }
+
+    [Fact]
+    public void PadXAndBMoveThrottleLikeShiftAndCtrl()
+    {
+        var input = new InputModule();
+        input.Start(new FakeBus());
+        input.SetState(GamepadFlight.Map(new PadState { X = true }));
+        Run(input, 30); // 0.5 s
+        Assert.Equal(0.95f, input.Throttle, 4);
+        input.SetState(GamepadFlight.Map(new PadState { B = true }));
+        Run(input, 60); // 1 s
+        Assert.Equal(0.45f, input.Throttle, 4);
+        // The triggers no longer touch the throttle.
+        input.SetState(GamepadFlight.Map(new PadState { LeftTrigger = 1f, RightTrigger = 1f }));
+        Run(input, 60);
+        Assert.Equal(0.45f, input.Throttle, 4);
+        Assert.True(input.Last.Fire);
+    }
+
+    [Fact]
+    public void PadSticksFlyThePlane()
+    {
+        var bus = new FakeBus();
+        var input = new InputModule();
+        input.Start(bus);
+        input.SetState(GamepadFlight.Map(new PadState { LeftY = 0.8f, LeftX = -0.6f, RightX = 0.4f, RightY = 1f }));
+        input.Tick(new TickContext(1, Step));
+        var msg = Only(bus, 0);
+        Assert.Equal(0.8f, msg.Pitch);
+        Assert.Equal(-0.6f, msg.Yaw);
+        Assert.Equal(0.4f, msg.Roll);
+        Assert.False(msg.Fire);
     }
 
     [Fact]
