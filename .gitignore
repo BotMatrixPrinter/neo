@@ -1,0 +1,10 @@
+.godot/
+bin/
+obj/
+.mono/
+*.user
+.vs/
+.idea/
+TestResults/
+export_presets.cfg
+*.translation
