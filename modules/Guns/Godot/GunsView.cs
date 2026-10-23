@@ -8,10 +8,11 @@ namespace Neo.Guns;
 
 /// <summary>
 /// Godot side of the Guns module: a glowing yellow-orange tracer streak for every third
-/// bullet (interpolated between fixed ticks), small muzzle flashes on each volley and a
-/// cartoon spark puff where a bullet hits. No rules here. Opened on its own (no module bound,
-/// e.g. by screenshot.sh) it runs a preview: its own Core fed a plane flying and firing at a
-/// balloon, a simple stand-in plane and balloon, and a chase camera.
+/// bullet of every plane (interpolated between fixed ticks), small muzzle flashes on each
+/// plane's volleys and a cartoon spark puff where a bullet hits (a smaller one on a plane).
+/// No rules here. Opened on its own (no module bound, e.g. by screenshot.sh) it runs a
+/// preview: its own Core fed the player and a wingman firing at a balloon and an enemy plane,
+/// simple stand-in planes and balloon, and a chase camera.
 /// </summary>
 public partial class GunsView : Node3D, IModuleView
 {
@@ -19,6 +20,7 @@ public partial class GunsView : Node3D, IModuleView
     private const float FlashSeconds = 0.07f;
     private const float SparkSeconds = 0.45f;
     private const int SparkBits = 6;
+    private const float PlaneSparkScale = 0.45f;
 
     private static readonly Color Tracer = new(1f, 0.92f, 0.35f);
     private static readonly Color TracerGlow = new(1f, 0.45f, 0.05f, 0.5f);
@@ -32,17 +34,19 @@ public partial class GunsView : Node3D, IModuleView
     private double _previewTime;
     private Vector3 _previewPlane;
     private Node3D? _previewPlaneNode;
+    private Node3D? _previewWingmanNode;
+    private Node3D? _previewEnemyNode;
     private Camera3D? _previewCamera;
 
     private readonly MeshInstance3D[] _tracers = new MeshInstance3D[GunsModule.PoolSize];
-    private readonly MeshInstance3D[] _flashes = new MeshInstance3D[GunsModule.Guns];
+    private readonly MeshInstance3D[,] _flashes = new MeshInstance3D[GunsModule.Planes, GunsModule.Guns];
     private readonly Node3D[] _sparks = new Node3D[GunsModule.HitRing];
     private readonly MeshInstance3D[,] _sparkBits = new MeshInstance3D[GunsModule.HitRing, SparkBits];
     private readonly MeshInstance3D[] _sparkPuffs = new MeshInstance3D[GunsModule.HitRing];
     private readonly float[] _sparkAge = new float[GunsModule.HitRing];
     private readonly Vector3[] _bitDirections = new Vector3[SparkBits];
-    private long _lastVolley;
-    private float _flashAge = FlashSeconds;
+    private readonly long[] _lastVolley = new long[GunsModule.Planes];
+    private readonly float[] _flashAge = new float[GunsModule.Planes];
     private int _hitsShown;
 
     public void Bind(IModule module) => _guns = (GunsModule)module;
@@ -51,6 +55,8 @@ public partial class GunsView : Node3D, IModuleView
     {
         if (_guns == null)
             StartPreview();
+        for (int p = 0; p < GunsModule.Planes; p++)
+            _flashAge[p] = FlashSeconds;
 
         var tracerCore = new StandardMaterial3D
         {
@@ -103,11 +109,12 @@ public partial class GunsView : Node3D, IModuleView
             tracer.Visible = false;
             _tracers[i] = tracer;
         }
-        for (int g = 0; g < GunsModule.Guns; g++)
-        {
-            _flashes[g] = Add(this, star, flash, outline);
-            _flashes[g].Visible = false;
-        }
+        for (int p = 0; p < GunsModule.Planes; p++)
+            for (int g = 0; g < GunsModule.Guns; g++)
+            {
+                _flashes[p, g] = Add(this, star, flash, outline);
+                _flashes[p, g].Visible = false;
+            }
         for (int b = 0; b < SparkBits; b++)
         {
             float a = b * Mathf.Tau / SparkBits;
@@ -138,6 +145,10 @@ public partial class GunsView : Node3D, IModuleView
         _previewPlane = ToGodot(position);
         _previewBus.Publish(new PlaneState(0, position, System.Numerics.Quaternion.Identity, velocity, 55f, 1f));
         _previewBus.Publish(new ControlInput(0, 0, 0, 0, 1f, true, false, System.Numerics.Vector3.Zero));
+        // A wingman alongside, firing at an enemy plane crossing slowly ahead of it.
+        _previewBus.Publish(new PlaneState(1, position + PreviewWingman, System.Numerics.Quaternion.Identity, velocity, 55f, 1f));
+        _previewBus.Publish(new ControlInput(1, 0, 0, 0, 1f, true, false, System.Numerics.Vector3.Zero));
+        _previewBus.Publish(new PlaneState(4, position + PreviewEnemy, System.Numerics.Quaternion.Identity, velocity, 55f, 1f));
         _previewBus.Publish(new TargetState(0, PreviewBalloon, 9f, 15, true));
         _guns.Tick(new TickContext((long)(_previewTime * 60 + 0.5), delta));
     }
@@ -175,29 +186,35 @@ public partial class GunsView : Node3D, IModuleView
             tracer.Visible = true;
         }
 
-        if (_guns.LastVolleyTick != _lastVolley)
+        for (int p = 0; p < GunsModule.Planes; p++)
         {
-            _lastVolley = _guns.LastVolleyTick;
-            _flashAge = 0;
-        }
-        _flashAge += dt;
-        bool flashing = _flashAge < FlashSeconds;
-        for (int g = 0; g < GunsModule.Guns; g++)
-        {
-            var flash = _flashes[g];
-            flash.Visible = flashing;
-            if (!flashing)
-                continue;
-            flash.Position = ToGodot(_guns.MuzzlePosition(g));
-            float size = 0.8f + 0.4f * ((_lastVolley + g) % 3);
-            flash.Scale = new Vector3(size, size, size * 1.8f);
-            flash.Rotation = new Vector3(0, 0, _lastVolley * 1.3f);
+            long volley = _guns.LastVolleyTick(p);
+            if (volley != _lastVolley[p])
+            {
+                _lastVolley[p] = volley;
+                _flashAge[p] = 0;
+            }
+            _flashAge[p] += dt;
+            bool flashing = _flashAge[p] < FlashSeconds && _guns.HasPlane(p);
+            for (int g = 0; g < GunsModule.Guns; g++)
+            {
+                var flash = _flashes[p, g];
+                flash.Visible = flashing;
+                if (!flashing)
+                    continue;
+                flash.Position = ToGodot(_guns.MuzzlePosition(p, g));
+                float size = 0.8f + 0.4f * ((volley + g + p) % 3);
+                flash.Scale = new Vector3(size, size, size * 1.8f);
+                flash.Rotation = new Vector3(0, 0, volley * 1.3f + p);
+            }
         }
 
         while (_hitsShown < _guns.Hits)
         {
             int s = _hitsShown % GunsModule.HitRing;
             _sparks[s].Position = ToGodot(_guns.HitPosition(_hitsShown));
+            // A hit on a plane is a small puff; on a balloon a full one.
+            _sparks[s].Scale = Vector3.One * (_guns.HitPlane(_hitsShown) >= 0 ? PlaneSparkScale : 1f);
             _sparkAge[s] = 0;
             _hitsShown++;
         }
@@ -207,6 +224,10 @@ public partial class GunsView : Node3D, IModuleView
         if (_previewCamera != null && _previewPlaneNode != null)
         {
             _previewPlaneNode.Position = _previewPlane;
+            if (_previewWingmanNode != null)
+                _previewWingmanNode.Position = _previewPlane + ToGodot(PreviewWingman);
+            if (_previewEnemyNode != null)
+                _previewEnemyNode.Position = _previewPlane + ToGodot(PreviewEnemy);
             _previewCamera.Position = _previewPlane + new Vector3(-7f, 3.5f, 14f);
             _previewCamera.LookAt(_previewPlane + new Vector3(0f, -1.5f, -90f), Vector3.Up);
         }
@@ -265,6 +286,25 @@ public partial class GunsView : Node3D, IModuleView
     private static Vector3 ToGodot(System.Numerics.Vector3 v) => new(v.X, v.Y, v.Z);
 
     private static readonly System.Numerics.Vector3 PreviewBalloon = new(6f, 319f, -400f);
+    private static readonly System.Numerics.Vector3 PreviewWingman = new(14f, 1f, 4f);
+    private static readonly System.Numerics.Vector3 PreviewEnemy = new(15f, 1.5f, -140f);
+
+    // A simple biplane: fuselage, two wings, tail plane and fin.
+    private Node3D StandInPlane(string name, Material body, Material wings, Material outline)
+    {
+        var plane = new Node3D { Name = name };
+        AddChild(plane);
+        var fuselage = Add(plane, new BoxMesh { Size = new Vector3(1.1f, 1.1f, 6f) }, body, outline);
+        fuselage.Position = new Vector3(0, -0.6f, 1.2f);
+        var wing = new BoxMesh { Size = new Vector3(9f, 0.18f, 1.6f) };
+        Add(plane, wing, wings, outline).Position = new Vector3(0, -1.3f, 0.2f);
+        Add(plane, wing, wings, outline).Position = new Vector3(0, 0.9f, -0.2f);
+        var tail = Add(plane, new BoxMesh { Size = new Vector3(3.2f, 0.15f, 1f) }, wings, outline);
+        tail.Position = new Vector3(0, -0.4f, 4f);
+        var fin = Add(plane, new BoxMesh { Size = new Vector3(0.15f, 1.3f, 1f) }, body, outline);
+        fin.Position = new Vector3(0, 0.3f, 4f);
+        return plane;
+    }
 
     private void StartPreview()
     {
@@ -297,18 +337,9 @@ public partial class GunsView : Node3D, IModuleView
         };
         var red = Toon(new Color(0.82f, 0.18f, 0.12f));
         var cream = Toon(new Color(0.96f, 0.91f, 0.76f));
-        var plane = new Node3D { Name = "PreviewPlane" };
-        AddChild(plane);
-        var fuselage = Add(plane, new BoxMesh { Size = new Vector3(1.1f, 1.1f, 6f) }, red, outline);
-        fuselage.Position = new Vector3(0, -0.6f, 1.2f);
-        var wing = new BoxMesh { Size = new Vector3(9f, 0.18f, 1.6f) };
-        Add(plane, wing, cream, outline).Position = new Vector3(0, -1.3f, 0.2f);
-        Add(plane, wing, cream, outline).Position = new Vector3(0, 0.9f, -0.2f);
-        var tail = Add(plane, new BoxMesh { Size = new Vector3(3.2f, 0.15f, 1f) }, cream, outline);
-        tail.Position = new Vector3(0, -0.4f, 4f);
-        var fin = Add(plane, new BoxMesh { Size = new Vector3(0.15f, 1.3f, 1f) }, red, outline);
-        fin.Position = new Vector3(0, 0.3f, 4f);
-        _previewPlaneNode = plane;
+        _previewPlaneNode = StandInPlane("PreviewPlane", red, cream, outline);
+        _previewWingmanNode = StandInPlane("PreviewWingman", red, cream, outline);
+        _previewEnemyNode = StandInPlane("PreviewEnemy", Toon(new Color(0.35f, 0.42f, 0.3f)), Toon(new Color(0.62f, 0.6f, 0.45f)), outline);
 
         var balloon = Add(this, new CapsuleMesh { Radius = 4.5f, Height = 18f, RadialSegments = 32, Rings = 12 }, cream, outline);
         balloon.Position = ToGodot(PreviewBalloon);

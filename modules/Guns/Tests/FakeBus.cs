@@ -40,6 +40,7 @@ internal sealed class QuietBus : IMessageBus
     public IMessageHandler<Neo.Flight.PlaneState>? Plane;
     public IMessageHandler<Neo.Targets.TargetState>? Target;
     public int Damages;
+    public int PlaneHits;
     public int States;
 
     public void Subscribe<T>(IMessageHandler<T> handler) where T : struct
@@ -56,6 +57,8 @@ internal sealed class QuietBus : IMessageBus
     {
         if (typeof(T) == typeof(Neo.Targets.DamageTarget))
             Damages++;
+        else if (typeof(T) == typeof(Neo.Damage.PlaneHit))
+            PlaneHits++;
         else if (typeof(T) == typeof(GunState))
             States++;
     }

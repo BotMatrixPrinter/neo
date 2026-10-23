@@ -12,7 +12,7 @@ public readonly struct GunState
         ShotsFired = shotsFired;
     }
 
-    /// <summary>The plane (0 for now: one plane).</summary>
+    /// <summary>The plane, 0..7 (0 is the player); one GunState per plane every step.</summary>
     public int PlaneId { get; }
 
     /// <summary>Barrel heat, 0 (cold) to 1 (overheated).</summary>

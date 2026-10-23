@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using Neo.Damage;
 using Neo.Flight;
 using Neo.Input;
 using Neo.Shell;
@@ -8,16 +9,21 @@ using Neo.Targets;
 namespace Neo.Guns;
 
 /// <summary>
-/// The Guns module: plane 0's twin machine guns. While <see cref="ControlInput.Fire"/> is held
-/// and the guns are not overheated, each gun fires <see cref="RoundsPerSecond"/>; bullets fly
-/// straight from the muzzles at the plane's velocity plus <see cref="MuzzleSpeed"/> along the
-/// nose, live <see cref="BulletLifeSeconds"/>, and each one that crosses an alive target's
-/// sphere is removed and publishes one <see cref="DamageTarget"/>(id, 1). Publishes a
-/// <see cref="GunState"/> every tick. Bullets live in a fixed pool; allocation-free per tick.
+/// The Guns module: every plane's twin machine guns. While a plane is alive, its
+/// <see cref="ControlInput.Fire"/> is held and its guns are not overheated, each gun fires
+/// <see cref="RoundsPerSecond"/>; bullets fly straight from the muzzles at the plane's velocity
+/// plus <see cref="MuzzleSpeed"/> along the nose and live <see cref="BulletLifeSeconds"/>. A
+/// bullet that crosses an alive target's sphere is removed and publishes one
+/// <see cref="DamageTarget"/>(id, 1); one that crosses an alive enemy plane's sphere
+/// (<see cref="PlaneRadius"/>) is removed and publishes one <see cref="PlaneHit"/> for the part
+/// hit. Publishes a <see cref="GunState"/> per plane every tick. Bullets live in a fixed pool;
+/// allocation-free per tick.
 /// </summary>
 public sealed class GunsModule : IModule
 {
-    public const int PlaneId = 0;
+    /// <summary>Planes with guns: ids 0..Planes-1; messages for other ids are ignored.</summary>
+    public const int Planes = Teams.PlaneCount;
+
     public const int Guns = 2;
 
     /// <summary>Rounds per second, per gun.</summary>
@@ -28,8 +34,8 @@ public sealed class GunsModule : IModule
 
     public const double BulletLifeSeconds = 1.5;
 
-    /// <summary>Size of the bullet pool (2 guns x 10/s x 1.5 s = 30 live at most).</summary>
-    public const int PoolSize = 64;
+    /// <summary>Size of the bullet pool (8 planes x 2 guns x 10/s x 1.5 s = 240 live at most).</summary>
+    public const int PoolSize = 256;
 
     /// <summary>Seconds of continuous fire from cold to overheated.</summary>
     public const double HeatUpSeconds = 4;
@@ -43,8 +49,20 @@ public sealed class GunsModule : IModule
     /// <summary>Highest target id tracked; targets with larger ids are ignored.</summary>
     public const int MaxTargets = 32;
 
+    /// <summary>A plane is hit inside this sphere around its position, meters.</summary>
+    public const float PlaneRadius = 4f;
+
+    /// <summary>Health one bullet takes from the part of a plane it hits.</summary>
+    public const float BulletDamage = 0.04f;
+
+    /// <summary>Body-space |x| beyond which a hit is on a wing, meters.</summary>
+    public const float WingX = 1f;
+
+    /// <summary>Body-space z (behind the center) beyond which a hit is on the tail, meters.</summary>
+    public const float TailZ = 2f;
+
     /// <summary>Recent hit positions kept for the view's spark puffs.</summary>
-    public const int HitRing = 16;
+    public const int HitRing = 32;
 
     /// <summary>Muzzle of the left gun in body space (+X right, -Z forward); the right one mirrors it.</summary>
     public static readonly Vector3 LeftMuzzle = new(-0.5f, 0f, -2f);
@@ -56,28 +74,36 @@ public sealed class GunsModule : IModule
     private readonly float[] _targetRadii = new float[MaxTargets];
     private readonly bool[] _targetAlive = new bool[MaxTargets];
     private readonly Vector3[] _hits = new Vector3[HitRing];
+    private readonly int[] _hitPlanes = new int[HitRing];
+    private readonly ControlInput[] _inputs = new ControlInput[Planes];
+    private readonly PlaneState[] _planes = new PlaneState[Planes];
+    private readonly bool[] _hasPlane = new bool[Planes];
+    private readonly double[] _heat = new double[Planes];
+    private readonly double[] _shotTimer = new double[Planes];
+    private readonly GunState[] _states = new GunState[Planes];
+    private readonly long[] _lastVolley = new long[Planes];
     private readonly InputHandler _inputHandler;
     private readonly PlaneHandler _planeHandler;
     private readonly TargetHandler _targetHandler;
     private IMessageBus? _bus;
-    private ControlInput _input;
-    private PlaneState _plane;
-    private bool _hasPlane;
-    private double _heat;
-    private double _shotTimer;
 
     public GunsModule()
     {
         _inputHandler = new InputHandler(this);
         _planeHandler = new PlaneHandler(this);
         _targetHandler = new TargetHandler(this);
+        for (int p = 0; p < Planes; p++)
+            _states[p] = new GunState(p, 0f, false, false, 0);
     }
 
-    /// <summary>The state published on the last tick.</summary>
-    public GunState State { get; private set; }
+    /// <summary>Plane 0's (the player's) state published on the last tick.</summary>
+    public GunState State => _states[0];
 
-    /// <summary>Tick number of the last volley (0 before any), for muzzle flashes.</summary>
-    public long LastVolleyTick { get; private set; }
+    /// <summary>The state of plane <paramref name="planeId"/>'s guns published on the last tick.</summary>
+    public GunState StateOf(int planeId) => _states[planeId];
+
+    /// <summary>Tick number of plane <paramref name="planeId"/>'s last volley (0 before any), for muzzle flashes.</summary>
+    public long LastVolleyTick(int planeId) => _lastVolley[planeId];
 
     /// <summary>The bullet pool; only entries with <see cref="Bullet.Alive"/> are in flight.</summary>
     public ReadOnlySpan<Bullet> Bullets => _bullets;
@@ -95,17 +121,44 @@ public sealed class GunsModule : IModule
         }
     }
 
-    /// <summary>Hits since start.</summary>
+    /// <summary>Hits since start, on targets and planes.</summary>
     public int Hits { get; private set; }
 
     /// <summary>Where hit number <paramref name="hit"/> (0-based) happened; only the last <see cref="HitRing"/> are kept.</summary>
     public Vector3 HitPosition(int hit) => _hits[hit % HitRing];
 
-    /// <summary>World position of gun <paramref name="gun"/>'s muzzle (0 left, 1 right) on the last plane state.</summary>
-    public Vector3 MuzzlePosition(int gun)
+    /// <summary>The plane hit number <paramref name="hit"/> struck, or -1 for a target (balloon).</summary>
+    public int HitPlane(int hit) => _hitPlanes[hit % HitRing];
+
+    /// <summary>True when a <see cref="PlaneState"/> has been received for <paramref name="planeId"/>.</summary>
+    public bool HasPlane(int planeId) => _hasPlane[planeId];
+
+    /// <summary>The last <see cref="PlaneState"/> received for <paramref name="planeId"/>.</summary>
+    public PlaneState Plane(int planeId) => _planes[planeId];
+
+    /// <summary>World position of plane <paramref name="planeId"/>'s gun <paramref name="gun"/> muzzle (0 left, 1 right) on its last state.</summary>
+    public Vector3 MuzzlePosition(int planeId, int gun)
     {
         var offset = gun == 0 ? LeftMuzzle : new Vector3(-LeftMuzzle.X, LeftMuzzle.Y, LeftMuzzle.Z);
-        return _plane.Position + Vector3.Transform(offset, _plane.Orientation);
+        ref readonly var plane = ref _planes[planeId];
+        return plane.Position + Vector3.Transform(offset, plane.Orientation);
+    }
+
+    /// <summary>
+    /// The part hit at <paramref name="hit"/> (world space) on a plane at <paramref name="position"/>
+    /// turned by <paramref name="orientation"/>: in the plane's frame, x below -1 m the left wing,
+    /// above 1 m the right wing, z above 2 m (behind) the tail, otherwise the engine.
+    /// </summary>
+    public static PlanePart PartAt(Vector3 hit, Vector3 position, Quaternion orientation)
+    {
+        var local = Vector3.Transform(hit - position, Quaternion.Conjugate(orientation));
+        if (local.X < -WingX)
+            return PlanePart.LeftWing;
+        if (local.X > WingX)
+            return PlanePart.RightWing;
+        if (local.Z > TailZ)
+            return PlanePart.Tail;
+        return PlanePart.Engine;
     }
 
     public void Start(IMessageBus bus)
@@ -119,54 +172,64 @@ public sealed class GunsModule : IModule
     public void Tick(in TickContext tick)
     {
         double dt = tick.StepSeconds;
-        bool firing = _input.Fire && _hasPlane && !State.Overheated;
-        bool overheated = State.Overheated;
-        int shots = State.ShotsFired;
+        for (int p = 0; p < Planes; p++)
+            TickGuns(p, tick.Tick, dt);
+        Fly(dt);
+        for (int p = 0; p < Planes; p++)
+            _bus?.Publish(_states[p]);
+    }
+
+    private void TickGuns(int p, long tick, double dt)
+    {
+        var state = _states[p];
+        bool firing = _inputs[p].Fire && _hasPlane[p] && _planes[p].Alive && !state.Overheated;
+        bool overheated = state.Overheated;
+        int shots = state.ShotsFired;
 
         if (firing)
         {
-            while (_shotTimer <= Epsilon)
+            while (_shotTimer[p] <= Epsilon)
             {
                 for (int gun = 0; gun < Guns; gun++)
-                    Spawn(gun, shots++);
-                _shotTimer += 1.0 / RoundsPerSecond;
-                LastVolleyTick = tick.Tick;
+                    Spawn(p, gun, shots++);
+                _shotTimer[p] += 1.0 / RoundsPerSecond;
+                _lastVolley[p] = tick;
             }
-            _shotTimer -= dt;
-            _heat = Math.Min(1.0, _heat + dt / HeatUpSeconds);
-            if (_heat >= 1.0 - Epsilon)
+            _shotTimer[p] -= dt;
+            _heat[p] = Math.Min(1.0, _heat[p] + dt / HeatUpSeconds);
+            if (_heat[p] >= 1.0 - Epsilon)
             {
-                _heat = 1.0;
+                _heat[p] = 1.0;
                 overheated = true;
             }
         }
         else
         {
-            _shotTimer = Math.Max(0.0, _shotTimer - dt);
-            _heat = Math.Max(0.0, _heat - dt / CoolDownSeconds);
-            if (overheated && _heat < ResumeHeat)
+            _shotTimer[p] = Math.Max(0.0, _shotTimer[p] - dt);
+            _heat[p] = Math.Max(0.0, _heat[p] - dt / CoolDownSeconds);
+            if (overheated && _heat[p] < ResumeHeat)
                 overheated = false;
         }
 
-        State = new GunState(PlaneId, (float)_heat, overheated, firing, shots);
-        Fly(dt);
-        _bus?.Publish(State);
+        _states[p] = new GunState(p, (float)_heat[p], overheated, firing, shots);
     }
 
-    private void Spawn(int gun, int serial)
+    private void Spawn(int shooter, int gun, int serial)
     {
         for (int i = 0; i < PoolSize; i++)
         {
             if (_bullets[i].Alive)
                 continue;
-            var forward = Vector3.Transform(-Vector3.UnitZ, _plane.Orientation);
-            var muzzle = MuzzlePosition(gun);
-            _bullets[i] = new Bullet(muzzle, muzzle, _plane.Velocity + forward * MuzzleSpeed, 0, serial, gun, true);
+            ref readonly var plane = ref _planes[shooter];
+            var forward = Vector3.Transform(-Vector3.UnitZ, plane.Orientation);
+            var muzzle = MuzzlePosition(shooter, gun);
+            _bullets[i] = new Bullet(muzzle, muzzle, plane.Velocity + forward * MuzzleSpeed, 0, serial, gun, true, shooter);
             return;
         }
     }
 
-    // Each live bullet moves one step; its segment is tested against every alive target sphere.
+    // Each live bullet moves one step; its segment is tested against every alive target sphere
+    // and every alive enemy plane's sphere, and the first one it enters is hit.
     private void Fly(double dt)
     {
         for (int i = 0; i < PoolSize; i++)
@@ -177,50 +240,49 @@ public sealed class GunsModule : IModule
             var from = bullet.Position;
             var to = from + bullet.Velocity * (float)dt;
             double age = bullet.Age + dt;
-            int target = FirstHit(from, to, out float t);
+            int target = FirstTarget(from, to, out float targetT);
+            int plane = FirstEnemyPlane(bullet.Shooter, from, to, out float planeT);
+            if (plane >= 0 && planeT <= targetT)
+            {
+                var at = Vector3.Lerp(from, to, planeT);
+                ref readonly var hit = ref _planes[plane];
+                var part = PartAt(at, hit.Position, hit.Orientation);
+                int shooter = bullet.Shooter;
+                bullet = default;
+                Record(at, plane);
+                _bus?.Publish(new PlaneHit(plane, shooter, part, BulletDamage));
+                continue;
+            }
             if (target >= 0)
             {
                 bullet = default;
-                _hits[Hits % HitRing] = Vector3.Lerp(from, to, t);
-                Hits++;
+                Record(Vector3.Lerp(from, to, targetT), -1);
                 _bus?.Publish(new DamageTarget(target, 1));
                 continue;
             }
             bullet = age >= BulletLifeSeconds - Epsilon
                 ? default
-                : new Bullet(to, from, bullet.Velocity, age, bullet.Serial, bullet.Gun, true);
+                : new Bullet(to, from, bullet.Velocity, age, bullet.Serial, bullet.Gun, true, bullet.Shooter);
         }
     }
 
+    private void Record(Vector3 at, int plane)
+    {
+        _hits[Hits % HitRing] = at;
+        _hitPlanes[Hits % HitRing] = plane;
+        Hits++;
+    }
+
     // The alive target whose sphere the segment from..to enters first, or -1.
-    private int FirstHit(Vector3 from, Vector3 to, out float hitT)
+    private int FirstTarget(Vector3 from, Vector3 to, out float hitT)
     {
         int best = -1;
         hitT = 2f;
-        var d = to - from;
-        float a = d.LengthSquared();
         for (int id = 0; id < MaxTargets; id++)
         {
             if (!_targetAlive[id])
                 continue;
-            var f = from - _targetPositions[id];
-            float r2 = _targetRadii[id] * _targetRadii[id];
-            float c = f.LengthSquared() - r2;
-            float t;
-            if (c <= 0f)
-                t = 0f;
-            else
-            {
-                if (a <= 0f)
-                    continue;
-                float b = 2f * Vector3.Dot(f, d);
-                float disc = b * b - 4f * a * c;
-                if (disc < 0f)
-                    continue;
-                t = (-b - MathF.Sqrt(disc)) / (2f * a);
-                if (t < 0f || t > 1f)
-                    continue;
-            }
+            float t = Enter(from, to, _targetPositions[id], _targetRadii[id]);
             if (t < hitT)
             {
                 hitT = t;
@@ -228,6 +290,45 @@ public sealed class GunsModule : IModule
             }
         }
         return best;
+    }
+
+    // The alive plane of the other team than `shooter` whose sphere the segment enters first, or -1.
+    private int FirstEnemyPlane(int shooter, Vector3 from, Vector3 to, out float hitT)
+    {
+        int best = -1;
+        hitT = 2f;
+        bool allies = Teams.IsAllies(shooter);
+        for (int id = 0; id < Planes; id++)
+        {
+            if (!_hasPlane[id] || !_planes[id].Alive || Teams.IsAllies(id) == allies)
+                continue;
+            float t = Enter(from, to, _planes[id].Position, PlaneRadius);
+            if (t < hitT)
+            {
+                hitT = t;
+                best = id;
+            }
+        }
+        return best;
+    }
+
+    // Fraction 0..1 along from..to where it enters the sphere (0 if it starts inside), or 2 for a miss.
+    private static float Enter(Vector3 from, Vector3 to, Vector3 center, float radius)
+    {
+        var d = to - from;
+        var f = from - center;
+        float c = f.LengthSquared() - radius * radius;
+        if (c <= 0f)
+            return 0f;
+        float a = d.LengthSquared();
+        if (a <= 0f)
+            return 2f;
+        float b = 2f * Vector3.Dot(f, d);
+        float disc = b * b - 4f * a * c;
+        if (disc < 0f)
+            return 2f;
+        float t = (-b - MathF.Sqrt(disc)) / (2f * a);
+        return t < 0f || t > 1f ? 2f : t;
     }
 
     private sealed class InputHandler : IMessageHandler<ControlInput>
@@ -238,8 +339,8 @@ public sealed class GunsModule : IModule
 
         public void Handle(in ControlInput message)
         {
-            if (message.PlaneId == PlaneId)
-                _module._input = message;
+            if ((uint)message.PlaneId < Planes)
+                _module._inputs[message.PlaneId] = message;
         }
     }
 
@@ -251,10 +352,11 @@ public sealed class GunsModule : IModule
 
         public void Handle(in PlaneState message)
         {
-            if (message.PlaneId != PlaneId)
+            int id = message.PlaneId;
+            if ((uint)id >= Planes)
                 return;
-            _module._plane = message;
-            _module._hasPlane = true;
+            _module._planes[id] = message;
+            _module._hasPlane[id] = true;
         }
     }
 
@@ -279,8 +381,9 @@ public sealed class GunsModule : IModule
 /// <summary>One bullet of the pool, for the view.</summary>
 public readonly struct Bullet
 {
-    public Bullet(Vector3 position, Vector3 previousPosition, Vector3 velocity, double age, int serial, int gun, bool alive)
+    public Bullet(Vector3 position, Vector3 previousPosition, Vector3 velocity, double age, int serial, int gun, bool alive, int shooter)
     {
+        Shooter = shooter;
         Position = position;
         PreviousPosition = previousPosition;
         Velocity = velocity;
@@ -302,7 +405,10 @@ public readonly struct Bullet
     /// <summary>Seconds in flight.</summary>
     public double Age { get; }
 
-    /// <summary>Shot number since start (0-based); every third one is a tracer.</summary>
+    /// <summary>The plane that fired it.</summary>
+    public int Shooter { get; }
+
+    /// <summary>Its plane's shot number since start (0-based); every third one is a tracer.</summary>
     public int Serial { get; }
 
     /// <summary>0 left gun, 1 right gun.</summary>
