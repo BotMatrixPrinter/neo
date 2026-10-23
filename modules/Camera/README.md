@@ -41,8 +41,7 @@ In the game it draws nothing else. Opened on its own (no module bound, as `scree
 does) it runs a preview: its own Core following a stand-in cartoon biplane on a banked
 300 m circle at 50 m/s, over a sea with islands and clouds.
 
-Screenshot: `screenshot.png`, made with
-`./screenshot.sh modules/Camera/Godot/Main.tscn modules/Camera/screenshot.png`.
+Screenshot (not committed): `./screenshot.sh modules/Camera/Godot/Main.tscn` (`Camera.png`).
 
 ## Tests (`Tests/`)
 

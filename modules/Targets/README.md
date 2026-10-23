@@ -31,8 +31,8 @@ cartoon pop: smoke puffs swelling and shreds flying out. Opened on its own (no m
 as `screenshot.sh` does) it runs a preview with its own Core, sky, light and a camera on
 balloon 0, which pops after 1.5 s; in the game it adds no camera or light.
 
-Screenshots: `screenshot.png` (FRAMES=60) and `screenshot-pop.png` (FRAMES=118), made with
-`FRAMES=n ./screenshot.sh modules/Targets/Godot/Main.tscn modules/Targets/<file>.png`.
+Screenshots (not committed): `FRAMES=60 ./screenshot.sh modules/Targets/Godot/Main.tscn` and,
+popping, `FRAMES=118 ./screenshot.sh modules/Targets/Godot/Main.tscn Targets-pop`.
 
 ## Tests (`Tests/`)
 

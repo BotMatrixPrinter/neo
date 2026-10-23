@@ -8,3 +8,7 @@ obj/
 TestResults/
 export_presets.cfg
 *.translation
+# Screenshots are never committed (screenshot.sh writes to $SCREENSHOT_DIR or screenshots/).
+/screenshots/
+/docs/screenshots/*.png
+/modules/*/screenshot*.png

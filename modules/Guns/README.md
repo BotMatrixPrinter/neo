@@ -42,8 +42,7 @@ bullet hits. No sound yet. Opened on its own (no module bound, as `screenshot.sh
 runs a preview with its own Core: a stand-in biplane flying and firing at a balloon, sky,
 light and a chase camera; in the game it adds no camera or light.
 
-Screenshot: `screenshot.png`, made with
-`./screenshot.sh modules/Guns/Godot/Main.tscn modules/Guns/screenshot.png`.
+Screenshot (not committed): `./screenshot.sh modules/Guns/Godot/Main.tscn` (`Guns.png`).
 
 ## Tests (`Tests/`)
 

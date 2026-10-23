@@ -61,9 +61,7 @@ Opened on its own (no module bound, as `screenshot.sh` does) it runs a preview: 
 Core fed a gentle banked right circle at 400 m, a sky, a light and a chase camera. In the
 game it adds no camera or light.
 
-Screenshot: `screenshot.png` (older, before the prop disc). New screenshots go to
-`$SCREENSHOT_DIR`, else `modules/Plane/shots/` (git-ignored, not committed):
-`./screenshot.sh modules/Plane/Godot/Main.tscn modules/Plane/shots/plane.png`.
+Screenshot (not committed): `./screenshot.sh modules/Plane/Godot/Main.tscn` (`Plane.png`).
 
 ## Tests (`Tests/`)
 

@@ -39,8 +39,8 @@ shell disables the module, the layer hides itself. Opened on its own (no module 
 `screenshot.sh` does) it runs a preview with its own Core over a sky backdrop: a plane
 climbing, the guns heating up and overheating every 6 s, a balloon popping every 0.5 s.
 
-Screenshots: `screenshot.png` (`./screenshot.sh modules/HUD/Godot/Main.tscn modules/HUD/screenshot.png`)
-and `screenshot-overheated.png` (same with `FRAMES=200`).
+Screenshots (not committed): `./screenshot.sh modules/HUD/Godot/Main.tscn` (`HUD.png`) and,
+overheated, `FRAMES=200 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-overheated`.
 
 ## Tests (`Tests/`)
 

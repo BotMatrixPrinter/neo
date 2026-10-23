@@ -4,8 +4,6 @@ The place you fly over: 4 km x 4 km of cartoon countryside ("Porco Rosso meets S
 Thieves"): a patchwork of green and golden fields with hedges, a winding river, a few low
 hills, clumps of low-poly trees, under a bright stylized sky.
 
-![World](screenshot.png)
-
 - **Contract** (`Contract/`): `WorldBounds`, constants other modules may use: the ground
   spans `-HalfSize..HalfSize` (2000 m) on X and Z around the origin at `GroundY` (0 m);
   hills stay below `MaxHillHeight` (15 m). No messages yet.
@@ -29,5 +27,5 @@ hills, clumps of low-poly trees, under a bright stylized sky.
 - **Tests** (`Tests/`): `WorldModuleTests`: starts and ticks without allocating, is the only
   entry class, targets net10.0, no Godot in Core or Contract.
 
-Test it alone: `./test.sh World`. Screenshot:
-`./screenshot.sh modules/World/Godot/Main.tscn modules/World/screenshot.png`.
+Test it alone: `./test.sh World`. Screenshot (not
+committed): `./screenshot.sh modules/World/Godot/Main.tscn` (`World.png`).
