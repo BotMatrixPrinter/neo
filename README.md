@@ -18,7 +18,8 @@ project.godot, Neo.csproj   the Godot project (the shell's); main scene shell/Go
 shell/                      the shell: whole-repo jobs only, changed rarely
   Contract/                 Neo.Shell.Contract: IModule, TickContext, IModuleView, IMessageBus, MessageBus
   Host/                     Neo.Shell.Host: ModuleHost (finds, starts and ticks modules, each guarded). No Godot.
-  Godot/                    Bootstrap.cs + Main.tscn: runs the ModuleHost inside Godot
+  Godot/                    Bootstrap.cs + Main.tscn: runs the ModuleHost inside Godot;
+                            Screenshot.gd: used by screenshot.sh
 tests/Neo.Shell.Tests/      xUnit tests of the shell (bus, host, guard)
 modules/<Name>/             one module per folder, e.g. modules/Clock/
   Contract/                 Neo.<Name>.Contract.csproj: its public interfaces, messages, data
@@ -27,6 +28,8 @@ modules/<Name>/             one module per folder, e.g. modules/Clock/
   Tests/                    Neo.<Name>.Tests.csproj: xUnit tests of its Core
   README.md                 what it does, what its Contract offers
 test.sh                     the test command (hub.json "test" and "module_test")
+screenshot.sh               renders a scene to a PNG (see Screenshots)
+docs/screenshots/           committed screenshots, <scene>.png
 ```
 
 `Neo.csproj` picks up every `modules/*/Contract` and `modules/*/Core` project and every
@@ -49,6 +52,20 @@ step (60 per second).
   started or was disabled.
 
 Restores are offline (packages only from `$NUGET_PACKAGES`; see `nuget.config`).
+
+## Screenshots
+
+`./screenshot.sh [scene] [out.png]` builds the project, runs a scene for real (OpenGL
+under `xvfb-run`, Mesa software rendering, no GPU) for 120 frames (`FRAMES=n` to change)
+and saves the last frame as a 1920x1080 PNG. `scene` is a `res://` or repo path of a
+`.tscn` (default: the main scene); `out.png` defaults to `docs/screenshots/<scene>.png`,
+e.g. `docs/screenshots/Main.png` for the main scene.
+
+**After any visual change, run `./screenshot.sh` (and for the scene you changed) and commit
+the PNG**, so Tony sees it on GitHub and Claude can review it. A module job may only change
+`modules/<Name>/`, so it saves its module's scene inside its folder:
+`./screenshot.sh modules/<Name>/Godot/Main.tscn modules/<Name>/screenshot.png`.
+Screenshots are not tests: `./test.sh` does not run it.
 
 ## Rules for every job
 
