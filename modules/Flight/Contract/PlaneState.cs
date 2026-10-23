@@ -9,7 +9,13 @@ namespace Neo.Flight;
 /// </summary>
 public readonly struct PlaneState
 {
+    /// <summary>A flying plane (<see cref="Alive"/> true).</summary>
     public PlaneState(int planeId, Vector3 position, Quaternion orientation, Vector3 velocity, float speed, float throttle)
+        : this(planeId, position, orientation, velocity, speed, throttle, true)
+    {
+    }
+
+    public PlaneState(int planeId, Vector3 position, Quaternion orientation, Vector3 velocity, float speed, float throttle, bool alive)
     {
         PlaneId = planeId;
         Position = position;
@@ -17,9 +23,10 @@ public readonly struct PlaneState
         Velocity = velocity;
         Speed = speed;
         Throttle = throttle;
+        Alive = alive;
     }
 
-    /// <summary>The plane (0 for now: one plane).</summary>
+    /// <summary>The plane: 0..7, see <see cref="Teams"/> (0 is the player).</summary>
     public int PlaneId { get; }
 
     /// <summary>World position, meters.</summary>
@@ -36,4 +43,7 @@ public readonly struct PlaneState
 
     /// <summary>Throttle in use, 0..1.</summary>
     public float Throttle { get; }
+
+    /// <summary>False while the plane is down (falling, or on the ground) until it respawns.</summary>
+    public bool Alive { get; }
 }

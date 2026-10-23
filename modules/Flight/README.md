@@ -1,9 +1,13 @@
 # Flight
 
-Flies the plane: an arcade model, not a simulation. One plane for now, `PlaneId` 0.
+Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..7 (the
+"Enemy Planes" 4 v 4): ids 0-3 team Allies (0 is the player, 1-3 bots), ids 4-7 team Central.
 
-- **Contract** (`Contract/`): `PlaneState` (namespace `Neo.Flight`), published on the bus
-  every fixed step, after the step:
+- **Contract** (`Contract/`, namespace `Neo.Flight`):
+  - `Teams` (static): `PlaneCount` (8), `TeamSize` (4), `bool IsAllies(int planeId)` (true
+    for 0-3; false for 4-7 and any other id), so every module agrees on teams.
+  - `PlaneState`, published on the bus every fixed step, after the step, for every plane,
+    in id order:
   - `int PlaneId`
   - `Vector3 Position`: world, meters, Y up
   - `Quaternion Orientation`: body to world (System.Numerics); body axes +X right, +Y up,
@@ -11,14 +15,23 @@ Flies the plane: an arcade model, not a simulation. One plane for now, `PlaneId`
   - `Vector3 Velocity`: world m/s, always along the nose
   - `float Speed`: m/s, the length of `Velocity`
   - `float Throttle`: 0..1, the throttle in use
-- **Input**: subscribes to `Neo.Input.ControlInput` (modules/Input/Contract) and uses the
-  latest one for its plane; others are ignored. Before any arrives: hands off, throttle 0.5.
-- **Core** (`Core/`): `FlightModule` (the `IModule`) steps a `FlightModel` each tick and
-  publishes its state. No allocations per tick; deterministic (same inputs, same result).
+  - `bool Alive`: false while the plane is down (falling or on the ground). Added after the
+    others: the old six-argument constructor still works and means `Alive` true.
+- **Input**: subscribes to `Neo.Input.ControlInput` (modules/Input/Contract); each plane uses
+  the latest one with its `PlaneId`; ids outside 0..7 are ignored. Before any arrives for a
+  plane: hands off (it levels itself), throttle 0.5.
+- **Damage**: subscribes to `Neo.Damage.PlaneDamageState`, `PlaneDestroyed` and
+  `PlaneRespawn` (modules/Damage/Contract); see "Damage" below.
+- **Core** (`Core/`): `FlightModule` (the `IModule`) keeps one `FlightModel` per plane
+  (`Plane(id)`, `Model` is plane 0), steps them all each tick and publishes their states.
+  No allocations per tick; deterministic (same inputs, same result).
 
 ## The model (`FlightModel`)
 
-- **Start**: in the air at (0, 400, 0), level, heading -Z, at cruise.
+- **Start** (`StartPosition(id)`, `StartOrientation(id)`): in the air at 400 m, level, at
+  cruise. Allies 1500 m south of the center (Z = +1500) heading north (-Z), Central 1500 m
+  north (Z = -1500) heading south (+Z); each team side by side 60 m apart along X, centered
+  on X = 0 (X = -90, -30, 30, 90 for the 1st..4th of the team).
 - **Speed**: throttle sets the level speed: 0 → 25 m/s (minimum), 0.5 → 42 m/s (cruise,
   about 150 km/h), 1 → 60 m/s (maximum), approached at 0.5/s. Diving gains speed and
   climbing loses it (6 m/s² per g of nose-down), always clamped to 25..60. The plane flies
@@ -46,6 +59,23 @@ Flies the plane: an arcade model, not a simulation. One plane for now, `PlaneId`
   climb or dive. A hard clamp at the edge is only a backstop. The floor wins over the pilot,
   and both guards win over the pilot's sticks and aim.
 
+## Damage
+
+Each plane keeps the latest part health from `PlaneDamageState` (0..1, 1 undamaged):
+
+- **Engine**: max speed is `MaxSpeed` times 0.6 + 0.4 x health (60 m/s healthy, 36 m/s
+  dead); neither throttle nor diving goes faster.
+- **Wings**: a damaged wing adds roll stick toward its side, 0.4 x (right damage - left
+  damage). Hands off, the levelling settles at a bank toward the damaged wing (about 13
+  degrees at 0.7 health, about 40 at 0); with sticks the pilot has to hold against it.
+- **Tail**: pitch and yaw rates are scaled by 0.4 + 0.6 x tail health (roll is not).
+- **`PlaneDestroyed`**: the plane falls, ignoring its pilot: the nose drops to about 60
+  degrees down (40 deg/s), it spins slowly about its nose (90 deg/s) and turns a little,
+  gaining speed in the dive, until it reaches the ground (Y = 0, World's `GroundY`); then
+  it stays there, speed and velocity 0. `Alive` is false all that time.
+- **`PlaneRespawn`**: back at its team's start point and heading, level, at full speed
+  (60 m/s), `Alive` true, parts back at full health.
+
 ## Tests
 
 `Tests/FlightModuleTests.cs`, with a fake bus (`TestBus`) that publishes fake
@@ -54,7 +84,10 @@ random flying), aim steering converges smoothly and banks into turns, rolls are 
 than pitch and yaw, hands-off levelling (banks, climbs and dives settle in 2 to 3 s
 without overshoot or wobble, heading kept, the short delay and dead zone, sticks override
 at once, inverted rights itself the shorter way, steep dives recover above the floor),
-floor and border hold, determinism, other planes' input ignored, no
-allocations per tick.
+floor and border hold, determinism (with damage, downing and respawn), no allocations per
+tick; eight planes start by team and are published every tick in id order, four planes fly
+from their own inputs (others hands off), the `Teams` helper, `PlaneState.Alive` with the
+old constructor, engine, wing and tail damage, falling to the ground and staying there on
+`PlaneDestroyed`, respawn at the team's start point at full speed.
 
 Test it alone: `./test.sh Flight`. No Godot view: the Plane module draws the plane.

@@ -8,8 +8,9 @@ namespace Neo.Flight;
 /// Arcade flight of one plane: not a simulation. The plane always flies along its nose at
 /// a speed between <see cref="MinSpeed"/> and <see cref="MaxSpeed"/> (no stall, no spin),
 /// turns at fixed body rates, and is kept above <see cref="FloorAltitude"/> and inside the
-/// <see cref="AreaHalfSize"/> square by steering it gently away. Deterministic; Step does
-/// not allocate.
+/// <see cref="AreaHalfSize"/> square by steering it gently away. Damage slows it, drags it
+/// into a roll and weakens its tail; a downed plane falls to the ground until it respawns.
+/// Deterministic; Step does not allocate.
 /// </summary>
 public sealed class FlightModel
 {
@@ -51,27 +52,109 @@ public sealed class FlightModel
     public const float LevelMaxRoll = 0.5f;
     public const float LevelMaxPitch = 0.6f;
 
+    /// <summary>Start points: Allies this far south (+Z) of the center, Central this far north (-Z).</summary>
+    public const float StartDistance = 1500f;
+    public const float StartAltitude = 400f;
+    /// <summary>Planes of a team start side by side, this far apart along X.</summary>
+    public const float StartSpacing = 60f;
+
+    /// <summary>Max speed with a dead engine, as a share of <see cref="MaxSpeed"/> (1 with a healthy engine).</summary>
+    public const float DeadEngineMaxSpeed = 0.6f;
+    /// <summary>Roll stick a fully destroyed wing adds toward its side (scaled by the damage).</summary>
+    public const float WingRollDrift = 0.4f;
+    /// <summary>Pitch and yaw rates with a fully destroyed tail, as a share of the healthy rates.</summary>
+    public const float DeadTailResponse = 0.4f;
+
+    /// <summary>A downed plane drops its nose to this climb (negative: nose down) and spins slowly.</summary>
+    public const float FallClimb = -60f * Deg;
+    public const float FallPitchRate = 40f * Deg;
+    public const float FallSpinRate = 90f * Deg;
+    public const float FallTurnRate = 25f * Deg;
+    /// <summary>Height of the ground (World's GroundY): a downed plane stops here.</summary>
+    public const float GroundAltitude = 0f;
+
     private const float Deg = MathF.PI / 180f;
 
-    private Vector3 _position = new(0f, 400f, 0f);
-    private Quaternion _orientation = Quaternion.Identity;
-    private float _speed = CruiseSpeed;
-    private float _throttle = CruiseThrottle;
+    private Vector3 _position;
+    private Quaternion _orientation;
+    private float _speed;
+    private float _throttle;
     private float _pitchCmd, _rollCmd, _yawCmd;
     private float _handsOffTime;
+    private float _engine = 1f, _leftWing = 1f, _rightWing = 1f, _tail = 1f;
+    private bool _alive = true;
+    private bool _grounded;
 
     public int PlaneId { get; }
 
-    public FlightModel(int planeId = 0) => PlaneId = planeId;
+    public FlightModel(int planeId = 0)
+    {
+        PlaneId = planeId;
+        _throttle = CruiseThrottle;
+        Place(CruiseSpeed);
+    }
+
+    /// <summary>
+    /// Where plane <paramref name="planeId"/> starts: Allies (0..3) <see cref="StartDistance"/> south
+    /// (+Z) of the center, Central (4..7) as far north, side by side <see cref="StartSpacing"/> apart.
+    /// </summary>
+    public static Vector3 StartPosition(int planeId)
+    {
+        int slot = ((planeId % Teams.TeamSize) + Teams.TeamSize) % Teams.TeamSize;
+        float x = (slot - (Teams.TeamSize - 1) * 0.5f) * StartSpacing;
+        return new Vector3(x, StartAltitude, Teams.IsAllies(planeId) ? StartDistance : -StartDistance);
+    }
+
+    /// <summary>Start orientation: Allies head north (-Z), Central south (+Z), level.</summary>
+    public static Quaternion StartOrientation(int planeId) =>
+        Teams.IsAllies(planeId) ? Quaternion.Identity : Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI);
+
+    public bool Alive => _alive;
+    /// <summary>Down and come to rest on the ground.</summary>
+    public bool Grounded => _grounded;
+    /// <summary>Max speed with the engine's current health.</summary>
+    public float MaxSpeedNow => MaxSpeed * (DeadEngineMaxSpeed + (1f - DeadEngineMaxSpeed) * _engine);
+
+    /// <summary>Health of each part, 0..1 (from the Damage module); values outside are clamped, NaN counts as 1.</summary>
+    public void SetDamage(float engine, float leftWing, float rightWing, float tail)
+    {
+        _engine = Health(engine);
+        _leftWing = Health(leftWing);
+        _rightWing = Health(rightWing);
+        _tail = Health(tail);
+    }
+
+    /// <summary>The plane is shot down: it falls (nose down, slow spin) to the ground and stays there.</summary>
+    public void Destroy() => _alive = false;
+
+    /// <summary>Back in the fight: at its team's start point, level, at full speed, undamaged.</summary>
+    public void Respawn()
+    {
+        _alive = true;
+        _grounded = false;
+        _engine = _leftWing = _rightWing = _tail = 1f;
+        _pitchCmd = _rollCmd = _yawCmd = 0f;
+        _handsOffTime = 0f;
+        Place(MaxSpeed);
+    }
+
+    private void Place(float speed)
+    {
+        _position = StartPosition(PlaneId);
+        _orientation = StartOrientation(PlaneId);
+        _speed = speed;
+    }
+
+    private static float Health(float value) => float.IsNaN(value) ? 1f : Math.Clamp(value, 0f, 1f);
 
     public Vector3 Position => _position;
     public Quaternion Orientation => _orientation;
     public float Speed => _speed;
     public float Throttle => _throttle;
     public Vector3 Forward => Vector3.Transform(-Vector3.UnitZ, _orientation);
-    public Vector3 Velocity => Forward * _speed;
+    public Vector3 Velocity => _grounded ? Vector3.Zero : Forward * _speed;
 
-    public PlaneState State => new(PlaneId, _position, _orientation, Velocity, _speed, _throttle);
+    public PlaneState State => new(PlaneId, _position, _orientation, Velocity, _speed, _throttle, _alive);
 
     /// <summary>Level speed the throttle settles at: 0 → min, <see cref="CruiseThrottle"/> → cruise, 1 → max.</summary>
     public static float SpeedForThrottle(float throttle)
@@ -85,6 +168,12 @@ public sealed class FlightModel
     /// <summary>One fixed step of <paramref name="dt"/> seconds with the pilot's controls.</summary>
     public void Step(in ControlInput input, float dt)
     {
+        if (!_alive)
+        {
+            Fall(dt);
+            return;
+        }
+
         Vector3 forward = Vector3.Transform(-Vector3.UnitZ, _orientation);
 
         bool handsOff = !input.HasAim && MathF.Abs(input.Pitch) < HandsOffDeadZone
@@ -105,15 +194,20 @@ public sealed class FlightModel
             yaw = input.Yaw;
         }
 
+        // A damaged wing drags the plane into a roll toward its side.
+        roll += ((1f - _rightWing) - (1f - _leftWing)) * WingRollDrift;
+
         float follow = MathF.Min(1f, ControlResponse * dt);
         _pitchCmd += (pitch - _pitchCmd) * follow;
         _rollCmd += (roll - _rollCmd) * follow;
         _yawCmd += (yaw - _yawCmd) * follow;
 
         // Body rates (local axes: +X right, +Y up, -Z forward), then the bank's turn about world up.
-        Quaternion body = Quaternion.CreateFromAxisAngle(Vector3.UnitX, _pitchCmd * PitchRate * dt)
+        // A damaged tail answers pitch and yaw more weakly.
+        float tail = DeadTailResponse + (1f - DeadTailResponse) * _tail;
+        Quaternion body = Quaternion.CreateFromAxisAngle(Vector3.UnitX, _pitchCmd * PitchRate * tail * dt)
             * Quaternion.CreateFromAxisAngle(Vector3.UnitZ, -_rollCmd * RollRate * dt)
-            * Quaternion.CreateFromAxisAngle(Vector3.UnitY, -_yawCmd * YawRate * dt);
+            * Quaternion.CreateFromAxisAngle(Vector3.UnitY, -_yawCmd * YawRate * tail * dt);
         Quaternion q = _orientation * body;
         float rightY = Vector3.Transform(Vector3.UnitX, q).Y;
         q = Quaternion.CreateFromAxisAngle(Vector3.UnitY, rightY * BankTurnRate * dt) * q;
@@ -121,16 +215,55 @@ public sealed class FlightModel
         forward = Vector3.Transform(-Vector3.UnitZ, _orientation);
 
         _throttle = input.Throttle;
-        float target = SpeedForThrottle(_throttle);
+        float maxSpeed = MaxSpeedNow;
+        float target = MathF.Min(SpeedForThrottle(_throttle), maxSpeed);
         _speed += (target - _speed) * MathF.Min(1f, SpeedResponse * dt);
         _speed -= forward.Y * DiveAcceleration * dt;
-        _speed = Math.Clamp(_speed, MinSpeed, MaxSpeed);
+        _speed = Math.Clamp(_speed, MinSpeed, maxSpeed);
 
         _position += forward * (_speed * dt);
         // Backstop only: the guard steering normally keeps the plane well inside these.
         _position.Y = MathF.Max(_position.Y, FloorAltitude);
         _position.X = Math.Clamp(_position.X, -AreaHalfSize, AreaHalfSize);
         _position.Z = Math.Clamp(_position.Z, -AreaHalfSize, AreaHalfSize);
+    }
+
+    /// <summary>
+    /// A downed plane: the nose drops to <see cref="FallClimb"/>, it spins slowly about its nose
+    /// and turns, gaining speed in the dive, until it reaches the ground; then it stays there.
+    /// </summary>
+    private void Fall(float dt)
+    {
+        if (_grounded)
+            return;
+
+        Vector3 forward = Vector3.Transform(-Vector3.UnitZ, _orientation);
+        if (MathF.Asin(Math.Clamp(forward.Y, -1f, 1f)) > FallClimb)
+        {
+            // Pitch the nose toward the ground about the world horizontal axis across it.
+            Vector3 axis = Vector3.Cross(forward, -Vector3.UnitY);
+            axis = axis.LengthSquared() > 1e-6f ? Vector3.Normalize(axis) : Vector3.Transform(Vector3.UnitX, _orientation);
+            _orientation = Quaternion.CreateFromAxisAngle(axis, FallPitchRate * dt) * _orientation;
+        }
+        _orientation = Quaternion.CreateFromAxisAngle(Vector3.UnitY, FallTurnRate * dt) * _orientation
+            * Quaternion.CreateFromAxisAngle(Vector3.UnitZ, -FallSpinRate * dt);
+        _orientation = Quaternion.Normalize(_orientation);
+        forward = Vector3.Transform(-Vector3.UnitZ, _orientation);
+
+        _speed += (MinSpeed - _speed) * MathF.Min(1f, SpeedResponse * dt);
+        _speed -= forward.Y * DiveAcceleration * dt;
+        _speed = Math.Clamp(_speed, MinSpeed, MaxSpeed);
+        _pitchCmd = _rollCmd = _yawCmd = 0f;
+
+        _position += forward * (_speed * dt);
+        _position.X = Math.Clamp(_position.X, -AreaHalfSize, AreaHalfSize);
+        _position.Z = Math.Clamp(_position.Z, -AreaHalfSize, AreaHalfSize);
+        if (_position.Y <= GroundAltitude)
+        {
+            _position.Y = GroundAltitude;
+            _speed = 0f;
+            _grounded = true;
+        }
     }
 
     /// <summary>A direction to steer to instead of the pilot when near the floor or the border.</summary>
