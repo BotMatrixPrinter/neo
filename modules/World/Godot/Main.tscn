@@ -1,0 +1,87 @@
+[gd_scene load_steps=15 format=3]
+
+[ext_resource type="Script" path="res://modules/World/Godot/WorldView.cs" id="1_view"]
+[ext_resource type="Shader" path="res://modules/World/Godot/Ground.gdshader" id="2_ground"]
+[ext_resource type="Shader" path="res://modules/World/Godot/Tree.gdshader" id="3_tree"]
+[ext_resource type="Shader" path="res://modules/World/Godot/Outline.gdshader" id="4_outline"]
+[ext_resource type="Shader" path="res://modules/World/Godot/Sky.gdshader" id="5_sky"]
+
+[sub_resource type="ShaderMaterial" id="sky_mat"]
+shader = ExtResource("5_sky")
+
+[sub_resource type="Sky" id="sky"]
+sky_material = SubResource("sky_mat")
+radiance_size = 0
+
+[sub_resource type="Environment" id="env"]
+background_mode = 2
+sky = SubResource("sky")
+ambient_light_source = 2
+ambient_light_color = Color(0.62, 0.72, 0.9, 1)
+ambient_light_energy = 0.38
+reflected_light_source = 1
+tonemap_mode = 0
+glow_enabled = true
+glow_intensity = 0.5
+glow_strength = 0.9
+glow_bloom = 0.05
+glow_hdr_threshold = 0.9
+fog_enabled = true
+fog_mode = 1
+fog_light_color = Color(0.8, 0.9, 0.96, 1)
+fog_light_energy = 1.0
+fog_sky_affect = 0.0
+fog_depth_curve = 1.6
+fog_depth_begin = 500.0
+fog_depth_end = 2600.0
+
+[sub_resource type="ShaderMaterial" id="ground_outline"]
+render_priority = 0
+shader = ExtResource("4_outline")
+shader_parameter/width_px = 2.0
+shader_parameter/radial_from_uv = false
+
+[sub_resource type="ShaderMaterial" id="ground_mat"]
+next_pass = SubResource("ground_outline")
+shader = ExtResource("2_ground")
+
+[sub_resource type="ShaderMaterial" id="tree_outline"]
+shader = ExtResource("4_outline")
+shader_parameter/width_px = 2.0
+shader_parameter/radial_from_uv = true
+
+[sub_resource type="ShaderMaterial" id="tree_mat"]
+next_pass = SubResource("tree_outline")
+shader = ExtResource("3_tree")
+
+[node name="World" type="Node3D"]
+script = ExtResource("1_view")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("env")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.766044, -0.413176, 0.492404, 0, 0.766044, 0.642788, -0.642788, -0.492404, 0.586824, 0, 100, 0)
+light_color = Color(1, 0.93, 0.8, 1)
+light_energy = 0.45
+shadow_enabled = true
+shadow_blur = 2.5
+shadow_bias = 1.0
+shadow_normal_bias = 3.0
+directional_shadow_mode = 1
+directional_shadow_max_distance = 600.0
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+material_override = SubResource("ground_mat")
+
+[node name="RoundTrees" type="MultiMeshInstance3D" parent="."]
+material_override = SubResource("tree_mat")
+
+[node name="Poplars" type="MultiMeshInstance3D" parent="."]
+material_override = SubResource("tree_mat")
+
+[node name="PreviewCamera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.970296, 0.241922, 0, -0.241922, 0.970296, -60, 150, 800)
+fov = 60.0
+far = 6000.0
+current = true
