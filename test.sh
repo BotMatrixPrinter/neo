@@ -12,6 +12,9 @@ dotnet test tests/Neo.Core.Tests --no-restore --nologo -v q
 
 echo "== build Godot project"
 dotnet build src/Neo.Game --no-restore --nologo -v q
+if ! grep -q '"tfm": "net10.0"' src/Neo.Game/.godot/mono/temp/bin/Debug/Neo.Game.runtimeconfig.json; then
+  echo "FAIL: Godot project does not target net10.0"; exit 1
+fi
 
 echo "== load main scene headless"
 log=$(mktemp)

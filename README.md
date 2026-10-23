@@ -6,7 +6,8 @@ runtime performance.
 
 ## Open it
 
-- Install **Godot .NET 4.7.2** (the .NET/mono build, not the standard one) and the .NET 8 SDK.
+- Install **Godot .NET 4.7.2** (the .NET/mono build, not the standard one) and the **.NET 10 SDK**
+  (neo targets `net10.0`, .NET 10 LTS); Godot needs it installed to open and build the project.
 - In Godot: Import → `src/Neo.Game/project.godot`. Build (hammer icon), then run.
 - Or from a shell: `dotnet build src/Neo.Game` then `godot --path src/Neo.Game`.
 
@@ -30,7 +31,7 @@ The example feature is `Clock` (a fixed-timestep clock): `src/Neo.Core/Core/Cloc
 ## Tests
 
 `./test.sh` restores offline (packages only from `$NUGET_PACKAGES`; see `nuget.config`),
-runs the Core tests, builds the Godot project, and loads the main scene in headless
+runs the Core tests, builds the Godot project (and checks it targets `net10.0`), and loads the main scene in headless
 Godot. It fails on any failing test, C# compile error, or scene/script load error.
 
 ## Rules for every job
@@ -46,5 +47,6 @@ Godot. It fails on any failing test, C# compile error, or scene/script load erro
   allocations, LINQ or boxing in per-frame code; Godot nodes only render.
 - **Tests stay fast:** Core logic is tested without Godot; the Godot check only loads
   the project.
-- Package versions are pinned to the offline cache (Godot.NET.Sdk 4.7.2, xunit 2.9.3,
+- All projects target `net10.0` (.NET 10 SDK, pinned in `global.json`). Package
+  versions are pinned to the offline cache (Godot.NET.Sdk 4.7.2, xunit 2.9.3,
   xunit.runner.visualstudio 4.0.1, Microsoft.NET.Test.Sdk 18.11.0); jobs have no network.
