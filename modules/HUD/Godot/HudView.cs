@@ -1,4 +1,5 @@
 using Godot;
+using Neo.Damage;
 using Neo.Flight;
 using Neo.Guns;
 using Neo.Shell;
@@ -10,9 +11,12 @@ namespace Neo.HUD;
 /// Godot side of the HUD module: dark rounded panels with a gold edge and bold outlined text.
 /// Bottom left: speed (km/h) and altitude (m), interpolated between fixed ticks, and the gun-heat
 /// bar (orange; flashing red with "OVERHEATED" while overheated). Top left: "Balloons popped: N",
-/// whose number pops when it rises. Laid out for 1920x1080 and scaled to the screen. No rules
-/// here. Opened on its own (no module bound, e.g. by screenshot.sh) it runs a preview: its own
-/// Core fed a plane climbing, guns heating up and balloons popping, over a sky backdrop.
+/// whose number pops when it rises, and the player's kills / deaths. Next to the flight panel: the
+/// damage panel, a plane icon colored by the player's part health. Top right: the kill feed.
+/// While the player is down: a big centered "SHOT DOWN!" and the respawn countdown. Laid out for
+/// 1920x1080 and scaled to the screen. No rules here. Opened on its own (no module bound, e.g. by
+/// screenshot.sh) it runs a preview: its own Core fed a plane climbing, guns heating up, balloons
+/// popping, damage, kills and the player shot down, over a sky backdrop.
 /// </summary>
 public partial class HudView : CanvasLayer, IModuleView
 {
@@ -31,6 +35,13 @@ public partial class HudView : CanvasLayer, IModuleView
     private static readonly Color HeatHot = new(1f, 0.38f, 0.2f);
     private static readonly Color BarTrack = new(0.05f, 0.05f, 0.07f, 0.95f);
     private static readonly Color BalloonRed = new(0.92f, 0.22f, 0.2f);
+    private static readonly Color ShotRed = new(1f, 0.25f, 0.18f);
+    private static readonly Color FeedFill = new(0.11f, 0.1f, 0.13f, 0.82f);
+    private static readonly Color FeedMine = new(0.32f, 0.2f, 0.05f, 0.9f);
+
+    private const float FeedWidth = 560f;
+    private const float FeedHeight = 58f;
+    private const float FeedFadeSeconds = 0.6f;
 
     // "0".."9999", built once so _Process never formats (no allocations per frame).
     private static string[]? _numbers;
@@ -39,6 +50,8 @@ public partial class HudView : CanvasLayer, IModuleView
     private MessageBus? _previewBus;
     private double _previewTime;
     private int _previewPops;
+    private int _previewEvent;
+    private int _previewCycle;
 
     private Control _root = null!;
     private Panel _flightPanel = null!;
@@ -47,6 +60,21 @@ public partial class HudView : CanvasLayer, IModuleView
     private Label _altitude = null!;
     private Label _popped = null!;
     private Label _plusOne = null!;
+    private Panel _scorePanel = null!;
+    private Label _kills = null!;
+    private Label _deaths = null!;
+    private Panel _damagePanel = null!;
+    private DamageIcon _damageIcon = null!;
+    private Control _feed = null!;
+    private readonly Panel[] _feedRows = new Panel[HudModule.KillFeedCapacity];
+    private readonly StyleBoxFlat[] _feedStyles = new StyleBoxFlat[HudModule.KillFeedCapacity];
+    private readonly Label[] _feedLabels = new Label[HudModule.KillFeedCapacity];
+    private readonly string?[] _feedShown = new string?[HudModule.KillFeedCapacity];
+    private Control _downLayer = null!;
+    private Control _downBox = null!;
+    private Label _downCountdown = null!;
+    private string? _downShown;
+    private float _downAge;
     private Label _overheated = null!;
     private Panel _heatFill = null!;
     private StyleBoxFlat _heatStyle = null!;
@@ -54,6 +82,8 @@ public partial class HudView : CanvasLayer, IModuleView
     private int _shownSpeed = -1;
     private int _shownAltitude = -1;
     private int _shownPops = -1;
+    private int _shownKills = -1;
+    private int _shownDeaths = -1;
     private float _popAge = PopSeconds;
     private float _clock;
 
@@ -115,6 +145,51 @@ public partial class HudView : CanvasLayer, IModuleView
         _plusOne = MakeLabel("+1", font, 34, Gold, new Vector2(440f, 0f), new Vector2(80f, 50f), HorizontalAlignment.Center);
         _plusOne.Visible = false;
         _popPanel.AddChild(_plusOne);
+
+        // Top left, next to the balloons: the player's kills and deaths.
+        _scorePanel = MakePanel(new Vector2(420f, 100f));
+        _root.AddChild(_scorePanel);
+        _scorePanel.AddChild(MakeLabel("Kills", font, 36, Cream, new Vector2(28f, 14f), new Vector2(110f, 72f), HorizontalAlignment.Left));
+        _kills = MakeLabel("0", font, 54, Gold, new Vector2(122f, 10f), new Vector2(90f, 80f), HorizontalAlignment.Center);
+        _scorePanel.AddChild(_kills);
+        _scorePanel.AddChild(MakeLabel("Deaths", font, 36, Cream, new Vector2(214f, 14f), new Vector2(130f, 72f), HorizontalAlignment.Left));
+        _deaths = MakeLabel("0", font, 54, ShotRed, new Vector2(326f, 10f), new Vector2(80f, 80f), HorizontalAlignment.Center);
+        _scorePanel.AddChild(_deaths);
+
+        // Bottom left, next to the flight panel: the damage panel.
+        _damagePanel = MakePanel(new Vector2(220f, 258f));
+        _root.AddChild(_damagePanel);
+        _damagePanel.AddChild(MakeLabel("DAMAGE", font, 26, Gold, new Vector2(0f, 16f), new Vector2(220f, 50f), HorizontalAlignment.Center));
+        _damageIcon = new DamageIcon { Position = new Vector2(30f, 84f) };
+        _damagePanel.AddChild(_damageIcon);
+
+        // Top right: the kill feed, newest on top.
+        _feed = new Control { Size = new Vector2(FeedWidth, (FeedHeight + 10f) * HudModule.KillFeedCapacity), MouseFilter = Control.MouseFilterEnum.Ignore };
+        _root.AddChild(_feed);
+        for (int i = 0; i < HudModule.KillFeedCapacity; i++)
+        {
+            var row = new Panel { Position = new Vector2(0f, i * (FeedHeight + 10f)), Size = new Vector2(FeedWidth, FeedHeight), MouseFilter = Control.MouseFilterEnum.Ignore, Visible = false };
+            _feedStyles[i] = Box(FeedFill, Gold, 3, 16, 6);
+            row.AddThemeStyleboxOverride("panel", _feedStyles[i]);
+            _feedLabels[i] = MakeLabel("", font, 30, Cream, new Vector2(16f, 0f), new Vector2(FeedWidth - 32f, FeedHeight), HorizontalAlignment.Right);
+            row.AddChild(_feedLabels[i]);
+            _feed.AddChild(row);
+            _feedRows[i] = row;
+        }
+
+        // Center: SHOT DOWN! and the countdown, over a red tint.
+        _downLayer = new Control { MouseFilter = Control.MouseFilterEnum.Ignore, Visible = false };
+        _root.AddChild(_downLayer);
+        var tint = new ColorRect { Color = new Color(0.5f, 0.05f, 0.02f, 0.28f), MouseFilter = Control.MouseFilterEnum.Ignore };
+        tint.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        _downLayer.AddChild(tint);
+        _downBox = new Control { Size = new Vector2(1100f, 300f), PivotOffset = new Vector2(550f, 150f), MouseFilter = Control.MouseFilterEnum.Ignore };
+        _downLayer.AddChild(_downBox);
+        var shot = MakeLabel("SHOT DOWN!", font, 150, ShotRed, Vector2.Zero, new Vector2(1100f, 190f), HorizontalAlignment.Center);
+        shot.LabelSettings.OutlineSize = 30;
+        _downBox.AddChild(shot);
+        _downCountdown = MakeLabel("", font, 56, Cream, new Vector2(0f, 196f), new Vector2(1100f, 90f), HorizontalAlignment.Center);
+        _downBox.AddChild(_downCountdown);
     }
 
     public override void _Notification(int what)
@@ -145,7 +220,44 @@ public partial class HudView : CanvasLayer, IModuleView
             _previewBus.Publish(new TargetDestroyed(_previewPops % 8, position));
             _previewPops++;
         }
+        PreviewCombat(t);
         _hud.Tick(new TickContext((long)(_previewTime * 60 + 0.5), delta));
+    }
+
+    // Preview, every 10 s: two kills in the feed, then the player shot down at 1.3 s (its parts
+    // worn down to a destroyed tail) and back 5 s later at full health.
+    private void PreviewCombat(float t)
+    {
+        int cycle = (int)(t / 10f);
+        if (cycle != _previewCycle)
+        {
+            _previewCycle = cycle;
+            _previewEvent = 0;
+        }
+        float c = t - cycle * 10f;
+        if (_previewEvent == 0 && c >= 0.3f)
+        {
+            _previewBus!.Publish(new PlaneDestroyed(5, 0));
+            _previewEvent++;
+        }
+        if (_previewEvent == 1 && c >= 0.8f)
+        {
+            _previewBus!.Publish(new PlaneDestroyed(6, 2));
+            _previewEvent++;
+        }
+        if (_previewEvent == 2 && c >= 1.3f)
+        {
+            _previewBus!.Publish(new PlaneDestroyed(0, 4));
+            _previewEvent++;
+        }
+        if (_previewEvent == 3 && c >= 6.3f)
+        {
+            _previewBus!.Publish(new PlaneRespawn(0));
+            _previewEvent++;
+        }
+        bool down = _previewEvent == 3;
+        float k = _previewEvent >= 4 ? 0f : Mathf.Min(c / 1.3f, 1f);
+        _previewBus!.Publish(new PlaneDamageState(0, 1f - 0.3f * k, 1f - 0.5f * k, 1f - 0.8f * k, 1f - k, !down));
     }
 
     public override void _Process(double delta)
@@ -215,6 +327,68 @@ public partial class HudView : CanvasLayer, IModuleView
             _popped.Rotation = 0f;
             _plusOne.Visible = false;
         }
+
+        int kills = Mathf.Min(_hud.Kills, MaxNumber);
+        if (kills != _shownKills)
+        {
+            _shownKills = kills;
+            _kills.Text = _numbers![kills];
+        }
+        int deaths = Mathf.Min(_hud.Deaths, MaxNumber);
+        if (deaths != _shownDeaths)
+        {
+            _shownDeaths = deaths;
+            _deaths.Text = _numbers![deaths];
+        }
+
+        _damageIcon.Set(_hud.Level(PlanePart.Engine), _hud.Level(PlanePart.LeftWing), _hud.Level(PlanePart.RightWing), _hud.Level(PlanePart.Tail));
+
+        // Kill feed: newest on top; lines with the player in them on a gold-brown panel; fading out at the end.
+        int count = _hud.KillFeedCount;
+        for (int row = 0; row < HudModule.KillFeedCapacity; row++)
+        {
+            if (row >= count)
+            {
+                _feedRows[row].Visible = false;
+                continue;
+            }
+            int line = count - 1 - row;
+            string text = _hud.KillFeedText(line);
+            if (!ReferenceEquals(text, _feedShown[row]))
+            {
+                _feedShown[row] = text;
+                _feedLabels[row].Text = text;
+                bool mine = _hud.KillFeedVictim(line) == HudModule.PlaneId || _hud.KillFeedShooter(line) == HudModule.PlaneId;
+                _feedStyles[row].BgColor = mine ? FeedMine : FeedFill;
+            }
+            float alpha = Mathf.Clamp((float)_hud.KillFeedSecondsLeft(line) / FeedFadeSeconds, 0f, 1f);
+            _feedRows[row].Modulate = new Color(1f, 1f, 1f, alpha);
+            _feedRows[row].Visible = true;
+        }
+
+        // Shot down: pops in big, then the countdown.
+        if (_hud.PlayerDown)
+        {
+            if (!_downLayer.Visible)
+            {
+                _downLayer.Visible = true;
+                _downAge = 0f;
+            }
+            _downAge += dt;
+            float k = Mathf.Clamp(_downAge / 0.45f, 0f, 1f);
+            float scale = 1f + 0.6f * Mathf.Exp(-6f * k) * Mathf.Cos(k * 9f) * (1f - k);
+            _downBox.Scale = new Vector2(scale, scale);
+            string countdown = _hud.RespawnText;
+            if (!ReferenceEquals(countdown, _downShown))
+            {
+                _downShown = countdown;
+                _downCountdown.Text = countdown;
+            }
+        }
+        else if (_downLayer.Visible)
+        {
+            _downLayer.Visible = false;
+        }
     }
 
     // Design space is 1920x1080; the root is scaled to fit the screen and the panels anchor to its corners.
@@ -229,6 +403,11 @@ public partial class HudView : CanvasLayer, IModuleView
         _root.Size = screen / scale;
         _popPanel.Position = new Vector2(Margin, Margin);
         _flightPanel.Position = new Vector2(Margin, _root.Size.Y - Margin - _flightPanel.Size.Y);
+        _scorePanel.Position = new Vector2(Margin + _popPanel.Size.X + 20f, Margin);
+        _damagePanel.Position = new Vector2(Margin + _flightPanel.Size.X + 20f, _flightPanel.Position.Y);
+        _feed.Position = new Vector2(_root.Size.X - Margin - FeedWidth, Margin);
+        _downLayer.Size = _root.Size;
+        _downBox.Position = new Vector2((_root.Size.X - _downBox.Size.X) * 0.5f, (_root.Size.Y - _downBox.Size.Y) * 0.5f - 60f);
     }
 
     private static int Number(float value) => Mathf.Clamp(Mathf.RoundToInt(value), 0, MaxNumber);

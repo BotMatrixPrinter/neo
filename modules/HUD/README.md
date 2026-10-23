@@ -1,6 +1,7 @@
 # HUD
 
-The on-screen display: speed, altitude, gun heat and balloons popped, in the game's cartoon
+The on-screen display: speed, altitude, gun heat, balloons popped, the player's damage, kills
+and deaths, the kill feed and the "shot down" countdown, in the game's cartoon
 style (dark rounded panels with a gold edge, bold outlined text).
 
 ## Messages
@@ -8,7 +9,11 @@ style (dark rounded panels with a gold edge, bold outlined text).
 Publishes nothing; its Contract (`Neo.HUD.Contract`) is empty for now.
 
 Uses other modules' Contracts: reads `Neo.Flight.PlaneState` (plane 0), `Neo.Guns.GunState`
-(plane 0) and `Neo.Targets.TargetDestroyed` (any target).
+(plane 0), `Neo.Targets.TargetDestroyed` (any target), and from `Neo.Damage`:
+`PlaneDamageState` (plane 0), `PlaneDestroyed` (any plane) and `PlaneRespawn` (plane 0).
+
+Plane names (the "Enemy Planes" wave): 0 is the player, "You"; 1-3 are "Blue <id>" (Allies),
+4-7 "Red <id>" (Central).
 
 ## Core (`Core/`)
 
@@ -20,8 +25,22 @@ Uses other modules' Contracts: reads `Neo.Flight.PlaneState` (plane 0), `Neo.Gun
   `HasPlane` once a plane-0 `PlaneState` has arrived.
 - `Heat` (0..1) and `Overheated`: from the last plane-0 `GunState`.
 - `BalloonsPopped`: one per `TargetDestroyed` received since start.
+- Damage panel: `Engine`, `LeftWing`, `RightWing`, `Tail` (0..1, 1 before any state) from the
+  last plane-0 `PlaneDamageState`; `Level(PlanePart)` / `LevelOf(health)` give the `PartLevel`:
+  `Good` (green) from 0.6, `Worn` (orange) below 0.6, `Critical` (red) below 0.3, `Destroyed`
+  (crossed out) at 0.
+- `Kills`: `PlaneDestroyed` of an enemy (4-7) shot by plane 0 (friendly fire is no kill);
+  `Deaths`: every `PlaneDestroyed` of plane 0.
+- Kill feed: one line per `PlaneDestroyed` (any plane), up to 6 (a 7th pushes out the oldest),
+  each for 5 s of Ticks. `KillFeedCount`, `KillFeedText(i)` (0 the oldest),
+  `KillFeedVictim/Shooter(i)`, `KillFeedSecondsLeft(i)`. Lines: "You shot down Red 5",
+  "Red 4 shot you down", "Blue 2 shot down Red 6", "Red 5 went down" (downed itself); built once
+  (`KillLine`, `PlaneName`).
+- Shot down: `PlayerDown` from plane 0's `PlaneDestroyed` until its `PlaneRespawn`;
+  `RespawnSecondsLeft` counts down from 5 each Tick, `RespawnCountdown` is it rounded up (5..1,
+  at least 1 while down) and `RespawnText` "Back in the air in N" (prebuilt; empty when up).
 
-Messages for other planes are ignored. No allocations per Tick or per message.
+Messages for other planes are ignored (except in the kill feed). No allocations per Tick or per message.
 
 ## Godot (`Godot/Main.tscn`, `HudView.cs`)
 
@@ -32,19 +51,29 @@ panels anchored to the corners:
   bar: orange, warming towards red as it fills; while overheated it flashes red with
   "OVERHEATED" on it;
 - top left: a little balloon and "Balloons popped: N"; when N rises the number bounces and
-  wiggles and a "+1" floats up.
+  wiggles and a "+1" floats up; next to it "Kills N  Deaths N";
+- bottom, next to the flight panel: DAMAGE, a little plane from above (`DamageIcon.cs`) whose
+  engine, wings and tail are green / orange / red, crossed out when destroyed;
+- top right: the kill feed, newest on top, lines with the player on a gold-brown panel, fading
+  out at the end of their 5 s;
+- while the player is down: a red tint, a big centered "SHOT DOWN!" that pops in, and
+  "Back in the air in N" under it.
 
 Numbers come from a prebuilt string table, so `_Process` does not format or allocate. When the
 shell disables the module, the layer hides itself. Opened on its own (no module bound, as
 `screenshot.sh` does) it runs a preview with its own Core over a sky backdrop: a plane
-climbing, the guns heating up and overheating every 6 s, a balloon popping every 0.5 s.
+climbing, the guns heating up and overheating every 6 s, a balloon popping every 0.5 s, and
+every 10 s two kills, then the player's parts wearing down until shot down at 1.3 s and back 5 s later.
 
-Screenshots (not committed): `./screenshot.sh modules/HUD/Godot/Main.tscn` (`HUD.png`) and,
+Screenshots (not committed): `./screenshot.sh modules/HUD/Godot/Main.tscn` (`HUD.png`, shot
+down), damaged but flying `FRAMES=65 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-damage`, and,
 overheated, `FRAMES=200 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-overheated`.
 
 ## Tests (`Tests/`)
 
 `HudModuleTests` (with a fake bus): km/h conversion, altitude, other planes ignored, previous
-values for interpolation, heat and overheat, counting pops, publishes nothing, no allocations.
+values for interpolation, heat and overheat, counting pops, part levels and the damage panel
+(plane 0 only), plane names and kill feed lines, the feed's 5 s and its limit, kills and deaths,
+the shot-down countdown to the respawn, publishes nothing, no allocations.
 
 Test it alone: `./test.sh HUD`.

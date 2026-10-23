@@ -1,3 +1,4 @@
+using Neo.Damage;
 using Neo.Flight;
 using Neo.Guns;
 using Neo.Shell;
@@ -10,7 +11,10 @@ namespace Neo.HUD;
 /// Plane 0's speed (km/h) and altitude (m) from <see cref="PlaneState"/>, its gun heat and
 /// overheat from <see cref="GunState"/>, and the balloons popped (one per
 /// <see cref="TargetDestroyed"/>). Speed and altitude are sampled each Tick, with the previous
-/// Tick's values kept so the view can interpolate. Publishes nothing; allocation-free.
+/// Tick's values kept so the view can interpolate. From the Damage module: plane 0's part health
+/// (<see cref="PlaneDamageState"/>), the kill feed and plane 0's kills and deaths
+/// (<see cref="PlaneDestroyed"/>), and the "shot down" countdown until its
+/// <see cref="PlaneRespawn"/>. Publishes nothing; allocation-free (texts come from tables built once).
 /// </summary>
 public sealed class HudModule : IModule
 {
@@ -19,9 +23,40 @@ public sealed class HudModule : IModule
     /// <summary>m/s to km/h.</summary>
     public const float KmhPerMetersPerSecond = 3.6f;
 
+    /// <summary>A part below this health is orange.</summary>
+    public const float WornBelow = 0.6f;
+
+    /// <summary>A part below this health is red.</summary>
+    public const float CriticalBelow = 0.3f;
+
+    /// <summary>Seconds a kill feed line stays up.</summary>
+    public const double KillFeedSeconds = 5.0;
+
+    /// <summary>Most kill feed lines shown at once; a new one pushes the oldest out.</summary>
+    public const int KillFeedCapacity = 6;
+
+    /// <summary>Plane ids 0-3 are the Allies (0 the player, 1-3 "Blue"), 4-7 the Central ("Red").</summary>
+    public const int Planes = 8;
+
+    /// <summary>The first id of team Central.</summary>
+    public const int FirstEnemy = 4;
+
+    private const int MaxCountdown = 9;
+
+    private static readonly string[] Names = BuildNames();
+    private static readonly string[] KillLines = BuildKillLines();
+    private static readonly string[] RespawnTexts = BuildRespawnTexts();
+
     private readonly PlaneHandler _planeHandler;
     private readonly GunHandler _gunHandler;
     private readonly DestroyedHandler _destroyedHandler;
+    private readonly DamageHandler _damageHandler;
+    private readonly PlaneDownHandler _planeDownHandler;
+    private readonly RespawnHandler _respawnHandler;
+    private readonly int[] _feedVictim = new int[KillFeedCapacity];
+    private readonly int[] _feedShooter = new int[KillFeedCapacity];
+    private readonly double[] _feedLeft = new double[KillFeedCapacity];
+    private PlaneDamageState _damage = new(PlaneId, 1f, 1f, 1f, 1f, true);
     private PlaneState _plane;
     private GunState _gun;
     private bool _sampled;
@@ -31,6 +66,9 @@ public sealed class HudModule : IModule
         _planeHandler = new PlaneHandler(this);
         _gunHandler = new GunHandler(this);
         _destroyedHandler = new DestroyedHandler(this);
+        _damageHandler = new DamageHandler(this);
+        _planeDownHandler = new PlaneDownHandler(this);
+        _respawnHandler = new RespawnHandler(this);
     }
 
     /// <summary>A <see cref="PlaneState"/> for plane 0 has been received.</summary>
@@ -57,11 +95,99 @@ public sealed class HudModule : IModule
     /// <summary>Balloons popped since start: one per <see cref="TargetDestroyed"/>.</summary>
     public int BalloonsPopped { get; private set; }
 
+    /// <summary>Plane 0's engine health, 0..1, from the last <see cref="PlaneDamageState"/> (1 before any).</summary>
+    public float Engine => _damage.Engine;
+
+    /// <summary>Plane 0's left wing health, 0..1.</summary>
+    public float LeftWing => _damage.LeftWing;
+
+    /// <summary>Plane 0's right wing health, 0..1.</summary>
+    public float RightWing => _damage.RightWing;
+
+    /// <summary>Plane 0's tail health, 0..1.</summary>
+    public float Tail => _damage.Tail;
+
+    /// <summary>How the damage panel colors <paramref name="part"/> of plane 0.</summary>
+    public PartLevel Level(PlanePart part) => LevelOf(_damage.Get(part));
+
+    /// <summary>Green from 0.6, orange below 0.6, red below 0.3, crossed out at 0.</summary>
+    public static PartLevel LevelOf(float health)
+    {
+        if (!(health > 0f))
+            return PartLevel.Destroyed;
+        if (health < CriticalBelow)
+            return PartLevel.Critical;
+        if (health < WornBelow)
+            return PartLevel.Worn;
+        return PartLevel.Good;
+    }
+
+    /// <summary>Planes the player (plane 0) shot down: <see cref="PlaneDestroyed"/> of an enemy (ids 4-7) by plane 0.</summary>
+    public int Kills { get; private set; }
+
+    /// <summary>Times the player (plane 0) went down: every <see cref="PlaneDestroyed"/> of plane 0.</summary>
+    public int Deaths { get; private set; }
+
+    /// <summary>Plane 0 is down: from its <see cref="PlaneDestroyed"/> until its <see cref="PlaneRespawn"/>.</summary>
+    public bool PlayerDown { get; private set; }
+
+    /// <summary>Seconds left until plane 0 is back (counts down from 5 while <see cref="PlayerDown"/>, then 0).</summary>
+    public double RespawnSecondsLeft { get; private set; }
+
+    /// <summary>The whole seconds shown, rounded up: 5, 4, 3, 2, 1 (at least 1 while down; 0 when up).</summary>
+    public int RespawnCountdown
+    {
+        get
+        {
+            if (!PlayerDown)
+                return 0;
+            int n = (int)System.Math.Ceiling(RespawnSecondsLeft - 1e-9);
+            return n < 1 ? 1 : n > MaxCountdown ? MaxCountdown : n;
+        }
+    }
+
+    /// <summary>"Back in the air in N" for <see cref="RespawnCountdown"/>; empty when the player is up.</summary>
+    public string RespawnText => PlayerDown ? RespawnTexts[RespawnCountdown] : string.Empty;
+
+    /// <summary>Kill feed lines shown now (at most <see cref="KillFeedCapacity"/>).</summary>
+    public int KillFeedCount { get; private set; }
+
+    /// <summary>Kill feed line <paramref name="index"/>, 0 the oldest, e.g. "You shot down Red 5".</summary>
+    public string KillFeedText(int index) => KillLine(_feedVictim[index], _feedShooter[index]);
+
+    /// <summary>The plane that went down in kill feed line <paramref name="index"/>.</summary>
+    public int KillFeedVictim(int index) => _feedVictim[index];
+
+    /// <summary>The plane that shot it down in kill feed line <paramref name="index"/>.</summary>
+    public int KillFeedShooter(int index) => _feedShooter[index];
+
+    /// <summary>Seconds kill feed line <paramref name="index"/> stays up (0..<see cref="KillFeedSeconds"/>).</summary>
+    public double KillFeedSecondsLeft(int index) => _feedLeft[index];
+
+    /// <summary>"You", "Blue 1".."Blue 3", "Red 4".."Red 7"; other ids "Plane N".</summary>
+    public static string PlaneName(int planeId) =>
+        planeId >= 0 && planeId < Names.Length ? Names[planeId] : "Plane " + planeId;
+
+    /// <summary>
+    /// The kill feed line for <paramref name="victim"/> downed by <paramref name="shooter"/>:
+    /// "You shot down Red 5", "Red 4 shot you down", "Blue 2 shot down Red 6", "Red 5 went down"
+    /// (downed itself). Prebuilt for ids 0-7, so it does not allocate for them.
+    /// </summary>
+    public static string KillLine(int victim, int shooter)
+    {
+        if (victim >= 0 && victim < Planes && shooter >= 0 && shooter < Planes)
+            return KillLines[victim * Planes + shooter];
+        return BuildKillLine(victim, shooter);
+    }
+
     public void Start(IMessageBus bus)
     {
         bus.Subscribe(_planeHandler);
         bus.Subscribe(_gunHandler);
         bus.Subscribe(_destroyedHandler);
+        bus.Subscribe(_damageHandler);
+        bus.Subscribe(_planeDownHandler);
+        bus.Subscribe(_respawnHandler);
     }
 
     public void Tick(in TickContext tick)
@@ -75,6 +201,87 @@ public sealed class HudModule : IModule
         SpeedKmh = speed;
         AltitudeMeters = altitude;
         _sampled = HasPlane;
+
+        double step = tick.StepSeconds;
+        if (PlayerDown)
+            RespawnSecondsLeft = System.Math.Max(0.0, RespawnSecondsLeft - step);
+
+        // Age the kill feed; drop lines whose 5 s are up, keeping the rest oldest first.
+        int kept = 0;
+        for (int i = 0; i < KillFeedCount; i++)
+        {
+            double left = _feedLeft[i] - step;
+            if (left <= 1e-9)
+                continue;
+            _feedVictim[kept] = _feedVictim[i];
+            _feedShooter[kept] = _feedShooter[i];
+            _feedLeft[kept] = left;
+            kept++;
+        }
+        KillFeedCount = kept;
+    }
+
+    private void OnPlaneDestroyed(in PlaneDestroyed message)
+    {
+        int victim = message.PlaneId;
+        int shooter = message.ShooterPlaneId;
+        if (shooter == PlaneId && victim >= FirstEnemy && victim < Planes)
+            Kills++;
+        if (victim == PlaneId)
+        {
+            Deaths++;
+            PlayerDown = true;
+            RespawnSecondsLeft = DamageLimits.RespawnSeconds;
+        }
+
+        if (KillFeedCount == KillFeedCapacity)
+        {
+            for (int i = 1; i < KillFeedCapacity; i++)
+            {
+                _feedVictim[i - 1] = _feedVictim[i];
+                _feedShooter[i - 1] = _feedShooter[i];
+                _feedLeft[i - 1] = _feedLeft[i];
+            }
+            KillFeedCount--;
+        }
+        _feedVictim[KillFeedCount] = victim;
+        _feedShooter[KillFeedCount] = shooter;
+        _feedLeft[KillFeedCount] = KillFeedSeconds;
+        KillFeedCount++;
+    }
+
+    private static string[] BuildNames()
+    {
+        var names = new string[Planes];
+        for (int id = 0; id < Planes; id++)
+            names[id] = id == PlaneId ? "You" : (id < FirstEnemy ? "Blue " : "Red ") + id;
+        return names;
+    }
+
+    private static string[] BuildKillLines()
+    {
+        var lines = new string[Planes * Planes];
+        for (int victim = 0; victim < Planes; victim++)
+            for (int shooter = 0; shooter < Planes; shooter++)
+                lines[victim * Planes + shooter] = BuildKillLine(victim, shooter);
+        return lines;
+    }
+
+    private static string BuildKillLine(int victim, int shooter)
+    {
+        if (victim == shooter)
+            return PlaneName(victim) + " went down";
+        if (victim == PlaneId)
+            return PlaneName(shooter) + " shot you down";
+        return PlaneName(shooter) + " shot down " + PlaneName(victim);
+    }
+
+    private static string[] BuildRespawnTexts()
+    {
+        var texts = new string[MaxCountdown + 1];
+        for (int n = 0; n <= MaxCountdown; n++)
+            texts[n] = "Back in the air in " + n;
+        return texts;
     }
 
     private sealed class PlaneHandler : IMessageHandler<PlaneState>
@@ -112,5 +319,42 @@ public sealed class HudModule : IModule
         public DestroyedHandler(HudModule module) => _module = module;
 
         public void Handle(in TargetDestroyed message) => _module.BalloonsPopped++;
+    }
+
+    private sealed class DamageHandler : IMessageHandler<PlaneDamageState>
+    {
+        private readonly HudModule _module;
+
+        public DamageHandler(HudModule module) => _module = module;
+
+        public void Handle(in PlaneDamageState message)
+        {
+            if (message.PlaneId == PlaneId)
+                _module._damage = message;
+        }
+    }
+
+    private sealed class PlaneDownHandler : IMessageHandler<PlaneDestroyed>
+    {
+        private readonly HudModule _module;
+
+        public PlaneDownHandler(HudModule module) => _module = module;
+
+        public void Handle(in PlaneDestroyed message) => _module.OnPlaneDestroyed(in message);
+    }
+
+    private sealed class RespawnHandler : IMessageHandler<PlaneRespawn>
+    {
+        private readonly HudModule _module;
+
+        public RespawnHandler(HudModule module) => _module = module;
+
+        public void Handle(in PlaneRespawn message)
+        {
+            if (message.PlaneId != PlaneId)
+                return;
+            _module.PlayerDown = false;
+            _module.RespawnSecondsLeft = 0.0;
+        }
     }
 }
