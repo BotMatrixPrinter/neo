@@ -1,15 +1,14 @@
-using System.Numerics;
-
 namespace Neo.Input;
 
 /// <summary>
-/// Raw device state as read by the Input module's Godot view each frame, already mapped
-/// to controls. <see cref="InputModule"/> keeps the latest one and turns it into
-/// <see cref="ControlInput"/> on each fixed step.
+/// Device state already mapped to controls: set by the Input module's Godot view each
+/// frame for a gamepad, or made by <see cref="KeyboardFlight"/> from keys. Has no aim.
+/// <see cref="InputModule"/> keeps the latest one and turns it into <see cref="ControlInput"/>
+/// on each fixed step.
 /// </summary>
 public readonly struct DeviceState
 {
-    public DeviceState(float pitch, float roll, float yaw, float throttleUp, float throttleDown, bool fire, bool hasAim, Vector3 aimDirection)
+    public DeviceState(float pitch, float roll, float yaw, float throttleUp, float throttleDown, bool fire)
     {
         Pitch = pitch;
         Roll = roll;
@@ -17,8 +16,6 @@ public readonly struct DeviceState
         ThrottleUp = throttleUp;
         ThrottleDown = throttleDown;
         Fire = fire;
-        HasAim = hasAim;
-        AimDirection = aimDirection;
     }
 
     /// <summary>-1..1, positive = nose up.</summary>
@@ -30,16 +27,11 @@ public readonly struct DeviceState
     /// <summary>-1..1, positive = yaw right.</summary>
     public float Yaw { get; }
 
-    /// <summary>0..1: how hard throttle-up is held (W key = 1, a trigger is analog).</summary>
+    /// <summary>0..1: how hard throttle-up is held (Shift key = 1, a trigger is analog).</summary>
     public float ThrottleUp { get; }
 
-    /// <summary>0..1: how hard throttle-down is held (S key = 1, a trigger is analog).</summary>
+    /// <summary>0..1: how hard throttle-down is held (Ctrl key = 1, a trigger is analog).</summary>
     public float ThrottleDown { get; }
 
     public bool Fire { get; }
-
-    public bool HasAim { get; }
-
-    /// <summary>World-space direction to fly toward (need not be unit length); used when <see cref="HasAim"/>.</summary>
-    public Vector3 AimDirection { get; }
 }

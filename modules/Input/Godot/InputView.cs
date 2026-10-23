@@ -4,20 +4,22 @@ using Neo.Shell;
 namespace Neo.Input;
 
 /// <summary>
-/// Godot side of the Input module: reads mouse, keyboard and gamepad each frame, hands
-/// the result to its Core as a <see cref="DeviceState"/>, and draws the aim reticle at
-/// the cursor. No rules here.
+/// Godot side of the Input module: reads the keyboard, the left mouse button and the
+/// gamepad each frame and hands them to its Core (<see cref="InputModule.SetKeys"/> or
+/// <see cref="InputModule.SetState"/>). The mouse only fires: it is not captured and
+/// nothing is drawn. No rules here.
 /// </summary>
 public partial class InputView : Control, IModuleView
 {
     private const float Deadzone = 0.15f;
     private const int MaxPads = 4;
-    private const float ReticleRadius = 10f;
+
+    /// <summary>W nose up, S nose down instead of the default (see <see cref="InputModule.DefaultInvertPitch"/>).</summary>
+    [Export]
+    public bool InvertPitch { get; set; } = InputModule.DefaultInvertPitch;
 
     private InputModule? _input;
     private bool _usingPad;
-    private bool _playing;
-    private bool _headless;
 
     public void Bind(IModule module) => _input = (InputModule)module;
 
@@ -25,35 +27,14 @@ public partial class InputView : Control, IModuleView
     {
         MouseFilter = MouseFilterEnum.Ignore;
         SetAnchorsPreset(LayoutPreset.FullRect);
-        _headless = DisplayServer.GetName() == "headless";
-        SetPlaying(true);
-    }
-
-    public override void _ExitTree()
-    {
-        if (!_headless)
-            Godot.Input.MouseMode = Godot.Input.MouseModeEnum.Visible;
     }
 
     public override void _Input(InputEvent e)
     {
         switch (e)
         {
-            case InputEventKey key when key.Pressed && key.PhysicalKeycode == Key.Escape:
-                SetPlaying(false);
-                _usingPad = false;
-                break;
-            case InputEventMouseButton button when button.Pressed:
-                if (!_playing)
-                {
-                    // The click that takes the mouse back does not fire.
-                    SetPlaying(true);
-                    GetViewport().SetInputAsHandled();
-                }
-                _usingPad = false;
-                break;
-            case InputEventMouseMotion:
-            case InputEventKey:
+            case InputEventMouseButton { Pressed: true }:
+            case InputEventKey { Pressed: true }:
                 _usingPad = false;
                 break;
             case InputEventJoypadMotion motion when Mathf.Abs(motion.AxisValue) > Deadzone:
@@ -67,52 +48,29 @@ public partial class InputView : Control, IModuleView
     {
         if (_input == null)
             return;
-        _input.SetState(_usingPad ? ReadPad() : ReadMouseAndKeyboard());
-        QueueRedraw();
+        _input.InvertPitch = InvertPitch;
+        if (_usingPad)
+            _input.SetState(ReadPad());
+        else
+            _input.SetKeys(ReadKeys());
     }
 
-    public override void _Draw()
+    private static KeyState ReadKeys() => new()
     {
-        if (_usingPad || !_playing)
-            return;
-        var at = GetLocalMousePosition();
-        var color = new Color(1f, 0.95f, 0.6f, 0.9f);
-        DrawArc(at, ReticleRadius, 0, Mathf.Tau, 24, color, 2f, true);
-        DrawLine(at + new Vector2(-ReticleRadius - 6, 0), at + new Vector2(-ReticleRadius + 3, 0), color, 2f);
-        DrawLine(at + new Vector2(ReticleRadius - 3, 0), at + new Vector2(ReticleRadius + 6, 0), color, 2f);
-        DrawLine(at + new Vector2(0, -ReticleRadius - 6), at + new Vector2(0, -ReticleRadius + 3), color, 2f);
-        DrawLine(at + new Vector2(0, ReticleRadius - 3), at + new Vector2(0, ReticleRadius + 6), color, 2f);
-        DrawCircle(at, 1.5f, color);
-    }
+        // Physical keys: the same places on AZERTY and other layouts.
+        W = Held(Key.W),
+        S = Held(Key.S),
+        A = Held(Key.A),
+        D = Held(Key.D),
+        Q = Held(Key.Q),
+        E = Held(Key.E),
+        Shift = Held(Key.Shift),
+        Ctrl = Held(Key.Ctrl),
+        Space = Held(Key.Space),
+        LeftMouse = Godot.Input.IsMouseButtonPressed(MouseButton.Left),
+    };
 
-    private void SetPlaying(bool playing)
-    {
-        _playing = playing;
-        if (_headless)
-            return;
-        // Confined + hidden: the cursor moves freely inside the window and we draw the reticle.
-        Godot.Input.MouseMode = playing ? Godot.Input.MouseModeEnum.ConfinedHidden : Godot.Input.MouseModeEnum.Visible;
-    }
-
-    private DeviceState ReadMouseAndKeyboard()
-    {
-        float up = Godot.Input.IsPhysicalKeyPressed(Key.W) ? 1f : 0f;
-        float down = Godot.Input.IsPhysicalKeyPressed(Key.S) ? 1f : 0f;
-        float yaw = (Godot.Input.IsPhysicalKeyPressed(Key.D) ? 1f : 0f) - (Godot.Input.IsPhysicalKeyPressed(Key.A) ? 1f : 0f);
-        bool fire = _playing && Godot.Input.IsMouseButtonPressed(MouseButton.Left);
-
-        bool hasAim = false;
-        var aim = System.Numerics.Vector3.Zero;
-        var viewport = GetViewport();
-        var camera = viewport.GetCamera3D();
-        if (_playing && camera != null)
-        {
-            Vector3 ray = camera.ProjectRayNormal(viewport.GetMousePosition());
-            aim = new System.Numerics.Vector3(ray.X, ray.Y, ray.Z);
-            hasAim = true;
-        }
-        return new DeviceState(0f, 0f, yaw, up, down, fire, hasAim, aim);
-    }
+    private static bool Held(Key key) => Godot.Input.IsPhysicalKeyPressed(key);
 
     private static DeviceState ReadPad()
     {
@@ -126,7 +84,7 @@ public partial class InputView : Control, IModuleView
             if (x == 0 && y == 0 && leftTrigger == 0 && rightTrigger == 0 && !a)
                 continue;
             // Stick back (down, +Y in Godot) = nose up, like a real control column.
-            return new DeviceState(y, x, 0f, rightTrigger, leftTrigger, a || rightTrigger > 0.5f, false, System.Numerics.Vector3.Zero);
+            return new DeviceState(y, x, 0f, rightTrigger, leftTrigger, a || rightTrigger > 0.5f);
         }
         return default;
     }
