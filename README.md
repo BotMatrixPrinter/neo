@@ -4,17 +4,27 @@ A Godot 4.7.2 / .NET 10 C# game: cartoon-style WWI arcade aerial combat, 4v4, wi
 tug-of-war front line. It is built from independent modules so that many jobs can work at
 once, each on one module, and one module breaking never breaks another.
 
-## Open it
+## Open it on your computer
 
-- Install **Godot .NET 4.7.2** (the .NET/mono build, not the standard one) and the **.NET 10 SDK**
-  (neo targets `net10.0`, .NET 10 LTS); Godot needs it installed to open and build the project.
-- In Godot: Import → `project.godot` at the repo root. Build (hammer icon), then run.
-- Or from a shell: `dotnet build Neo.csproj` then `godot --path .`.
+Works on Windows, Linux and macOS (including Apple Silicon Macs).
+
+1. Install the **.NET 10 SDK** (https://dotnet.microsoft.com/download; neo targets `net10.0`,
+   .NET 10 LTS) and **Godot 4.7.2 .NET** (https://godotengine.org/download: the .NET build,
+   not the standard one; on macOS the universal build runs natively on Apple Silicon).
+2. `git clone` the repo.
+3. In Godot's Project Manager: Import → pick `project.godot` at the repo root.
+4. Press Play (▶, or F5). Godot builds the C# first.
+
+The first open (or first build) downloads Godot.NET.Sdk, xunit and the other packages from
+nuget.org (`nuget.config`), so it needs the internet once; after that it builds offline.
+From a shell instead: `dotnet build Neo.csproj` then `godot --path .`.
 
 ## Layout
 
 ```
 project.godot, Neo.csproj   the Godot project (the shell's); main scene shell/Godot/Main.tscn
+nuget.config, global.json   package source (nuget.org) and pinned .NET SDK / Godot.NET.Sdk
+Directory.Build.props       settings for every project (NU1900 not an error)
 shell/                      the shell: whole-repo jobs only, changed rarely
   Contract/                 Neo.Shell.Contract: IModule, TickContext, IModuleView, IMessageBus, MessageBus
   Host/                     Neo.Shell.Host: ModuleHost (finds, starts and ticks modules, each guarded). No Godot.
@@ -51,7 +61,10 @@ step (60 per second).
   Godot build and headless load; at runtime it fails only if `<Name>` itself was not
   started or was disabled.
 
-Restores are offline (packages only from `$NUGET_PACKAGES`; see `nuget.config`).
+Packages come from nuget.org (`nuget.config`). Every version is pinned exactly, so a
+restore whose packages are already in the NuGet global packages folder needs no network
+(jobs run offline this way). `Directory.Build.props` keeps NU1900 (the vulnerability audit
+could not reach nuget.org) a warning, so offline builds pass despite `TreatWarningsAsErrors`.
 
 ## Screenshots
 
@@ -70,8 +83,8 @@ Screenshots are not tests: `./test.sh` does not run it.
 ## Rules for every job
 
 - **Shell vs modules.** The shell (`project.godot`, `Neo.csproj`, `shell/`, `tests/`,
-  `test.sh`, `hub.json`, this README) is changed only by whole-repo jobs, rarely. Everything
-  else is a module under `modules/<Name>/`.
+  `test.sh`, `hub.json`, `nuget.config`, `global.json`, `Directory.Build.props`, this
+  README) is changed only by whole-repo jobs, rarely. Everything else is a module under `modules/<Name>/`.
 - **One job per module.** A module job changes only its own folder `modules/<Name>/`, and
   is tested with `./test.sh <Name>`. Many module jobs run side by side; they share no files
   and no tests. A job takes under an hour.
@@ -97,8 +110,10 @@ Screenshots are not tests: `./test.sh` does not run it.
 - **Tests stay fast:** Core logic is tested without Godot; the Godot check only loads
   the project.
 - All projects target `net10.0` (.NET 10 SDK, pinned in `global.json`). Package
-  versions are pinned to the offline cache (Godot.NET.Sdk 4.7.2, xunit 2.9.3,
-  xunit.runner.visualstudio 4.0.1, Microsoft.NET.Test.Sdk 18.11.0); jobs have no network.
+  versions are pinned exactly (Godot.NET.Sdk 4.7.2, xunit 2.9.3,
+  xunit.runner.visualstudio 4.0.1, Microsoft.NET.Test.Sdk 18.11.0) so jobs, which have no
+  network, restore them from their package cache; a new package or version needs a job
+  container that has it cached.
 
 ## Add a module
 

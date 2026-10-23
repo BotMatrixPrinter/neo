@@ -1,0 +1,7 @@
+<Project>
+  <!-- Every project here. NU1900 only says the NuGet vulnerability audit could not reach
+       nuget.org (e.g. offline); keep it a warning so offline restores still work. -->
+  <PropertyGroup>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1900</WarningsNotAsErrors>
+  </PropertyGroup>
+</Project>

@@ -3,7 +3,7 @@
 #   ./test.sh          every module's tests and the shell's, Godot build, headless main-scene load.
 #   ./test.sh <Name>   tests of module <Name> and of modules whose projects reference
 #                      <Name>'s Contract, then the same Godot build and headless load.
-# Offline: packages come only from $NUGET_PACKAGES (see nuget.config).
+# Works offline once the pinned packages are in the NuGet global packages folder (see nuget.config).
 set -euo pipefail
 cd "$(dirname "$0")"
 
