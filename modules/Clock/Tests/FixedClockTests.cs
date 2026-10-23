@@ -1,8 +1,8 @@
 using System;
-using Neo.Core.Clock;
+using Neo.Clock;
 using Xunit;
 
-namespace Neo.Core.Tests.Clock;
+namespace Neo.Clock.Tests;
 
 public class FixedClockTests
 {

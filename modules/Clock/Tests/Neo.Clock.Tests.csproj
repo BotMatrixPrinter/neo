@@ -11,6 +11,6 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="../../src/Neo.Core/Neo.Core.csproj" />
+    <ProjectReference Include="../Core/Neo.Clock.Core.csproj" />
   </ItemGroup>
 </Project>

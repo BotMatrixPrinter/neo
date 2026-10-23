@@ -1,6 +1,6 @@
 using System;
 
-namespace Neo.Core.Clock;
+namespace Neo.Clock;
 
 /// <summary>
 /// Fixed-timestep clock. Allocation-free; safe to call every frame.

@@ -1,0 +1,28 @@
+<Project Sdk="Godot.NET.Sdk/4.7.2">
+  <!-- The shell's Godot project. Modules are picked up by wildcard: never list one here. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>Neo</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Only the shell's and modules' Godot scripts; Core, Contract and Tests are their own projects. -->
+    <EnableDefaultItems>false</EnableDefaultItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="shell/Godot/**/*.cs;modules/*/Godot/**/*.cs" />
+    <NeoModuleCore Include="modules/*/Core/*.csproj" />
+    <ProjectReference Include="shell/Contract/Neo.Shell.Contract.csproj;shell/Host/Neo.Shell.Host.csproj" />
+    <ProjectReference Include="modules/*/Contract/*.csproj" />
+    <ProjectReference Include="@(NeoModuleCore)" />
+  </ItemGroup>
+  <!-- One [ModuleAssembly(assembly, folder)] per modules/<Name>/Core/*.csproj, for the Bootstrap. -->
+  <Target Name="NeoModuleAssemblies" BeforeTargets="GetAssemblyAttributes">
+    <ItemGroup>
+      <AssemblyAttribute Include="Neo.Shell.Host.ModuleAssemblyAttribute">
+        <_Parameter1>%(NeoModuleCore.Filename)</_Parameter1>
+        <_Parameter2>$([System.IO.Path]::GetFileName($([System.IO.Path]::GetDirectoryName($([System.IO.Path]::GetDirectoryName('%(NeoModuleCore.FullPath)'))))))</_Parameter2>
+      </AssemblyAttribute>
+    </ItemGroup>
+  </Target>
+</Project>

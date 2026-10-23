@@ -1,4 +1,4 @@
-namespace Neo.Core.Clock;
+namespace Neo.Clock;
 
 /// <summary>
 /// Public interface of the Clock feature: a fixed-timestep clock.

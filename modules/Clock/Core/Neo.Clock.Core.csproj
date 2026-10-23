@@ -3,7 +3,11 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <LangVersion>12</LangVersion>
-    <RootNamespace>Neo.Core</RootNamespace>
+    <RootNamespace>Neo.Clock</RootNamespace>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../shell/Contract/Neo.Shell.Contract.csproj" />
+    <ProjectReference Include="../Contract/Neo.Clock.Contract.csproj" />
+  </ItemGroup>
 </Project>

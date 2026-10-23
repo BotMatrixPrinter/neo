@@ -1,1 +1,1 @@
-{"test": "./test.sh"}
+{"test": "./test.sh", "module_test": "./test.sh {module}"}

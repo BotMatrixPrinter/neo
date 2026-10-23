@@ -6,9 +6,13 @@ config_version=5
 [application]
 
 config/name="Neo"
-run/main_scene="res://Main.tscn"
+run/main_scene="res://shell/Godot/Main.tscn"
 config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 
 [dotnet]
 
-project/assembly_name="Neo.Game"
+project/assembly_name="Neo"
+
+[physics]
+
+common/physics_ticks_per_second=60
