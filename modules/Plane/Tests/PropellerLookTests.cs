@@ -1,7 +1,5 @@
 using System;
-using System.IO;
 using System.Numerics;
-using System.Text;
 using System.Text.Json;
 using Xunit;
 
@@ -92,16 +90,15 @@ public class PropellerLookTests
         Assert.Equal(0.5f, PropellerLook.DiscFade(mid), 3);
     }
 
-    [Fact]
-    public void ModelHasAPropellerNodeThatTurnsAboutTheNoseAxis()
+    [Theory]
+    [InlineData(PlaneModel.Biplane)]
+    [InlineData(PlaneModel.Triplane)]
+    public void ModelHasAPropellerNodeThatTurnsAboutTheNoseAxis(PlaneModel model)
     {
-        using var gltf = ReadGlbJson(Path.Combine(ModuleDir(), "Models", "biplane.glb"));
+        using var gltf = Glb.ReadJson(model);
         var root = gltf.RootElement;
-        JsonElement? propeller = null;
-        foreach (var node in root.GetProperty("nodes").EnumerateArray())
-            if (node.TryGetProperty("name", out var name) && name.GetString() == "Propeller")
-                propeller = node;
-        Assert.True(propeller.HasValue, "biplane.glb has no Propeller node");
+        var propeller = Glb.Node(gltf, "Propeller");
+        Assert.True(propeller.HasValue, PlaneLook.FileName(model) + " has no Propeller node");
         var prop = propeller!.Value;
 
         // Its own axes are the plane's: no rotation or scale, so its local Z is the nose axis (nose toward -Z).
@@ -134,23 +131,5 @@ public class PropellerLookTests
         Assert.True(depthZ < 0.2f * MathF.Max(spanX, spanY), "propeller is not thin along the nose axis");
         for (int i = 0; i < 3; i++)
             Assert.Equal(0f, (min[i].GetSingle() + max[i].GetSingle()) / 2f, 2);
-    }
-
-    private static JsonDocument ReadGlbJson(string path)
-    {
-        byte[] data = File.ReadAllBytes(path);
-        Assert.Equal("glTF", Encoding.ASCII.GetString(data, 0, 4));
-        int length = BitConverter.ToInt32(data, 12);
-        Assert.Equal("JSON", Encoding.ASCII.GetString(data, 16, 4));
-        return JsonDocument.Parse(new ReadOnlyMemory<byte>(data, 20, length));
-    }
-
-    // modules/Plane/, found upward from the test binaries.
-    private static string ModuleDir()
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
-            if (File.Exists(Path.Combine(dir.FullName, "Models", "biplane.glb")))
-                return dir.FullName;
-        throw new FileNotFoundException("modules/Plane/Models/biplane.glb not found above " + AppContext.BaseDirectory);
     }
 }
