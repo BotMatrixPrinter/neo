@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <RootNamespace>Neo.Flight</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../shell/Contract/Neo.Shell.Contract.csproj" />
+    <ProjectReference Include="../Contract/Neo.Flight.Contract.csproj" />
+    <ProjectReference Include="../../Input/Contract/Neo.Input.Contract.csproj" />
+  </ItemGroup>
+</Project>
