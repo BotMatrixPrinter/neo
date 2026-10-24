@@ -543,155 +543,99 @@ public class FlightModuleTests
         throw new InvalidOperationException("never reached");
     }
 
-    [Fact]
-    public void HandsOff_BankedPlaneRollsWingsLevelSmoothlyIn2To3Seconds()
+    /// <summary>Signed heading change (rad) from <paramref name="from"/> to <paramref name="to"/>, the shorter way.</summary>
+    private static float Turned(float from, float to)
     {
-        foreach (float side in new[] { 1f, -1f })
-        {
-            var rig = new Rig();
-            FlyUntil(rig, Sticks(roll: side), s => MathF.Abs(Bank(s)) > 34f * Deg);
-            float peak = 0f, previous = 0f, settledAt = float.NaN, t = 0f;
-            bool falling = false;
-            rig.Fly(Sticks(), 5f, s =>
-            {
-                t += (float)Dt;
-                float bank = Bank(s) * side;
-                Assert.True(bank > -0.5f * Deg, $"overshot level: {bank / Deg} deg");
-                if (falling)
-                    Assert.True(bank <= previous + 0.01f * Deg, $"wobbled: {previous / Deg} -> {bank / Deg} deg");
-                else if (bank < previous)
-                    falling = true;
-                peak = MathF.Max(peak, bank);
-                previous = bank;
-                if (float.IsNaN(settledAt) && falling && bank < 2f * Deg)
-                    settledAt = t;
-            });
-            Assert.InRange(peak / Deg, 40f, 52f); // about a 45 degree bank
-            Assert.InRange(settledAt, 1.5f, 3f);
-            Assert.True(MathF.Abs(Bank(rig.Bus.States[0])) < 0.5f * Deg);
-            Assert.True(MathF.Abs(Climb(rig.Bus.States[0])) < 1f * Deg);
-            // Level now: no more turning, the heading holds.
-            float heading = Heading(rig.Bus.States[0]);
-            rig.Fly(Sticks(), 3f);
-            Assert.True(MathF.Abs(Heading(rig.Bus.States[0]) - heading) < 0.5f * Deg);
-        }
-    }
-
-    [Fact]
-    public void HandsOff_ClimbOrDiveKeepsItsPitchAngleAndHeading()
-    {
-        foreach (float side in new[] { 1f, -1f })
-        {
-            var rig = new Rig();
-            var released = FlyUntil(rig, Sticks(pitch: side), s => MathF.Abs(Climb(s)) > 25f * Deg);
-            float held = Climb(released), heading = Heading(released), t = 0f;
-            rig.Fly(Sticks(), 8f, s =>
-            {
-                t += (float)Dt;
-                float off = MathF.Abs(Climb(s) - held);
-                // Only the stick's lag nudges it right after the release; then it holds within a degree.
-                Assert.True(off < (t < 1.5f ? 6f : 1f) * Deg, $"at {t} s: climb {Climb(s) / Deg} deg, held {held / Deg} deg");
-                Assert.True(MathF.Abs(Heading(s) - heading) < 0.5f * Deg, "heading kept");
-                Assert.True(MathF.Abs(Bank(s)) < 0.5f * Deg, "wings stay level");
-            });
-            Assert.True(MathF.Abs(Climb(rig.Bus.States[0]) - held) < 0.5f * Deg);
-            Assert.True(MathF.Abs(held) > 25f * Deg, "still climbing or diving, not pulled to the horizon");
-        }
+        float d = to - from;
+        if (d > MathF.PI) d -= 2f * MathF.PI;
+        else if (d < -MathF.PI) d += 2f * MathF.PI;
+        return d;
     }
 
     [Theory]
     [InlineData(1f)]
     [InlineData(-1f)]
-    public void HandsOff_BankedClimbOrDiveLevelsItsWingsButKeepsItsPitchAngle(float side)
+    public void NoInput_BankedPlaneStaysBankedAndKeepsTurning(float side)
     {
         var rig = new Rig();
-        // A 20 degree climb or dive, then a 45 degree bank: let go.
-        FlyUntil(rig, Sticks(pitch: side), s => MathF.Abs(Climb(s)) > 17f * Deg);
-        rig.Fly(Sticks(), 2f);
-        var released = FlyUntil(rig, Sticks(roll: 1f), s => Bank(s) > 45f * Deg);
-        float held = Climb(released);
-        Assert.InRange(held * side / Deg, 16f, 22f);
-        var end = rig.Fly(Sticks(), 5f, s =>
-        {
-            Assert.True(MathF.Abs(Climb(s) - held) < 1.5f * Deg, $"climb {Climb(s) / Deg} deg, held {held / Deg} deg");
-            Assert.True(Bank(s) > -0.5f * Deg, "no overshoot past wings level");
-        });
-        Assert.True(MathF.Abs(Bank(end)) < 0.5f * Deg, "wings level");
-        Assert.True(MathF.Abs(Climb(end) - held) < 1f * Deg, "pitch angle kept");
-    }
-
-    [Fact]
-    public void HandsOff_WaitsAShortMomentAndCountsTinySticksAsHandsOff()
-    {
-        var rig = new Rig();
-        FlyUntil(rig, Sticks(roll: 1f), s => Bank(s) > 40f * Deg);
-        float bank = Bank(rig.Bus.States[0]);
-        // For the first 0.2 s after letting go nothing rolls the wings back (they even roll on a bit with the stick's lag).
-        Assert.True(Bank(rig.Fly(Sticks(), 0.2f)) >= bank);
-        // Sticks inside the dead zone are hands off: it levels its wings and keeps its climb.
-        float climb = Climb(rig.Bus.States[0]);
-        var s = rig.Fly(Sticks(pitch: 0.03f, roll: -0.04f, yaw: 0.04f), 4f);
-        Assert.True(MathF.Abs(Bank(s)) < 1f * Deg);
-        Assert.True(MathF.Abs(Climb(s) - climb) < 1f * Deg);
-    }
-
-    [Fact]
-    public void AnyInputOverridesLevellingAtOnce_ThenItResumes()
-    {
-        var rig = new Rig();
-        FlyUntil(rig, Sticks(roll: 1f), s => Bank(s) > 40f * Deg);
-        float bank = Bank(rig.Fly(Sticks(), 0.5f)); // levelling under way
-        Assert.True(bank < 40f * Deg);
-
-        // Rolling further right: the stick wins at the usual roll rate.
-        var s = rig.Fly(Sticks(roll: 1f), 0.3f);
-        Assert.True(Bank(s) > bank + 30f * Deg, $"{bank / Deg} -> {Bank(s) / Deg} deg");
-
-        // A small stick just outside the dead zone holds the plane off level for as long as it is held.
-        rig.Fly(Sticks(pitch: 0.06f), 3f, p => Assert.True(Bank(p) > bank, "no levelling while a stick is held"));
-
-        // Let go: it levels its wings again, keeping the climb it had at the release.
-        float climb = Climb(rig.Bus.States[0]);
-        s = rig.Fly(Sticks(), 4f);
-        Assert.True(MathF.Abs(Bank(s)) < 1f * Deg);
-        Assert.True(MathF.Abs(Climb(s) - climb) < 2f * Deg, $"climb {climb / Deg} -> {Climb(s) / Deg} deg");
-
-        // Holding a climb hands off, the pitch stick takes over at once (and the nose is free to go anywhere).
-        rig = new Rig();
-        FlyUntil(rig, Sticks(pitch: 1f), p => Climb(p) > 20f * Deg);
-        float held = Climb(rig.Fly(Sticks(), 3f));
-        s = rig.Fly(Sticks(pitch: -1f), 0.5f);
-        Assert.True(Climb(s) < held - 15f * Deg, $"{held / Deg} -> {Climb(s) / Deg} deg");
-        s = rig.Fly(Sticks(pitch: 1f), 1f);
-        Assert.True(Climb(s) > held + 20f * Deg, $"{held / Deg} -> {Climb(s) / Deg} deg");
-
-        // Mouse aim is never levelled: it keeps a climb aimed at.
-        rig = new Rig();
-        var aim = Vector3.Normalize(new Vector3(0f, 0.5f, -1f));
-        s = rig.Fly(Aim(aim), 8f);
-        Assert.True(AngleBetween(Forward(s), Ahead(aim)) < 3f * Deg);
-    }
-
-    [Theory]
-    [InlineData(1f)]
-    [InlineData(-1f)]
-    public void HandsOff_InvertedRightsItselfTheShorterWay(float side)
-    {
-        var rig = new Rig();
-        // Rolled past 135 degrees: the shorter way back is the way it came.
-        FlyUntil(rig, Sticks(roll: side), s => Bank(s) * side > 135f * Deg);
-        float previous = Bank(rig.Bus.States[0]);
+        FlyUntil(rig, Sticks(roll: side), s => Bank(s) * side > 40f * Deg);
+        // Let go: only the stick's short lag rolls it on a little, then nothing touches the bank.
+        var settled = rig.Fly(Sticks(), 0.5f);
+        float bank = Bank(settled), climb = Climb(settled), heading = Heading(settled);
+        Assert.InRange(bank * side / Deg, 40f, 60f);
+        float turned = 0f;
         rig.Fly(Sticks(), 6f, s =>
         {
-            float bank = Bank(s);
-            Assert.True(MathF.Abs(bank - previous) < 10f * Deg, "never rolls through inverted the long way");
-            Assert.True(bank * side > -0.5f * Deg, "no overshoot past wings level");
-            previous = bank;
+            Assert.True(MathF.Abs(Bank(s) - bank) < 0.5f * Deg, $"bank {bank / Deg} -> {Bank(s) / Deg} deg");
+            Assert.True(MathF.Abs(Climb(s) - climb) < 0.5f * Deg, $"climb {climb / Deg} -> {Climb(s) / Deg} deg");
+            turned += Turned(heading, Heading(s));
+            heading = Heading(s);
         });
-        var end = rig.Bus.States[0];
-        Assert.True(Vector3.Transform(Vector3.UnitY, end.Orientation).Y > 0.999f, "upright");
-        Assert.True(MathF.Abs(Climb(end)) < 1f * Deg);
-        Assert.True(end.Alive);
+        // Still turning the bank's way all along: 6 s at about 30 x sin(bank) degrees a second.
+        Assert.True(turned * side > 80f * Deg, $"turned {turned / Deg} deg");
+        Assert.True(rig.Bus.States[0].Alive);
+    }
+
+    [Theory]
+    [InlineData(1f)]
+    [InlineData(-1f)]
+    public void NoInput_ClimbOrDiveKeepsItsAngle_OnlyGravityAndPowerChangeTheSpeed(float side)
+    {
+        var rig = new Rig();
+        rig.Fly(Sticks(throttle: 1f), 0.5f);
+        FlyUntil(rig, Sticks(pitch: side, throttle: 1f), s => Climb(s) * side > 15f * Deg);
+        var settled = rig.Fly(Sticks(throttle: 1f), 0.5f);
+        float climb = Climb(settled), heading = Heading(settled), speed = settled.Speed;
+        Assert.InRange(climb * side / Deg, 15f, 25f);
+        var end = rig.Fly(Sticks(throttle: 1f), 6f, s =>
+        {
+            Assert.True(MathF.Abs(Climb(s) - climb) < 0.5f * Deg, $"climb {climb / Deg} -> {Climb(s) / Deg} deg");
+            Assert.True(MathF.Abs(Turned(heading, Heading(s))) < 0.5f * Deg, "heading kept");
+            Assert.True(MathF.Abs(Bank(s)) < 0.5f * Deg, "wings stay level");
+        });
+        // Gravity along the path: the climb bleeds speed, the dive builds it past the level maximum.
+        if (side > 0)
+            Assert.True(end.Speed < speed - 1f, $"climb: {speed} -> {end.Speed} m/s");
+        else
+            Assert.True(end.Speed > FlightModel.MaxSpeed + 5f, $"dive: {speed} -> {end.Speed} m/s");
+    }
+
+    [Theory]
+    [InlineData(1f)]
+    [InlineData(-1f)]
+    public void NoInput_InvertedStaysInverted(float side)
+    {
+        var rig = new Rig();
+        FlyUntil(rig, Sticks(roll: side), s => Bank(s) * side > 170f * Deg);
+        var settled = rig.Fly(Sticks(), 0.5f);
+        rig.Fly(Sticks(), 3f, s =>
+            Assert.True(RotationAngle(settled.Orientation, s.Orientation) < 1f * Deg, "attitude kept, no righting"));
+        Assert.True(Vector3.Transform(Vector3.UnitY, rig.Bus.States[0].Orientation).Y < -0.9f, "still upside down");
+    }
+
+    [Fact]
+    public void TinySticksAct_NoDeadZoneNoDelay()
+    {
+        // A small aiming correction is never taken back: a tiny roll stick rolls the plane on for as long as
+        // it is held, and stays where it was let go.
+        var rig = new Rig();
+        float start = Bank(rig.Fly(Sticks(), 0.5f));
+        float bank = Bank(rig.Fly(Sticks(roll: 0.03f), 2f));
+        Assert.True(bank - start > 5f * Deg, $"tiny stick: {start / Deg} -> {bank / Deg} deg");
+        bank = Bank(rig.Fly(Sticks(), 0.5f));
+        Assert.True(MathF.Abs(Bank(rig.Fly(Sticks(), 3f)) - bank) < 0.5f * Deg, "kept after letting go");
+
+        // A tiny pitch stick raises the nose the same way, and the new climb is kept.
+        rig = new Rig();
+        float climb = Climb(rig.Fly(Sticks(pitch: 0.03f), 3f));
+        Assert.True(climb > 3f * Deg, $"tiny pitch: {climb / Deg} deg");
+        climb = Climb(rig.Fly(Sticks(), 0.5f));
+        Assert.True(MathF.Abs(Climb(rig.Fly(Sticks(), 3f)) - climb) < 0.5f * Deg, "climb kept");
+
+        // The stick acts at once after any time with no input.
+        rig = new Rig();
+        rig.Fly(Sticks(), 3f);
+        Assert.True(Bank(rig.Fly(Sticks(roll: 1f), 0.3f)) > 30f * Deg);
     }
 
     /// <summary>Height (m) of plane <paramref name="s"/>'s lowest point above World's terrain under it.</summary>
@@ -754,7 +698,7 @@ public class FlightModuleTests
     [InlineData(5)]
     public void Crash_DivingPlaneHitsTheGroundAtTheTerrainHeight_OnePlaneCrashed(int id)
     {
-        // Stick full forward into a steep dive, then held there hands off, full throttle, player and bot: no pull-up,
+        // Stick full forward into a steep dive, then let go, full throttle, player and bot: no pull-up,
         // it flies into the ground.
         var rig = new Rig();
         var s = FlyUntilCrash(rig, p => new ControlInput(id, Climb(p) > -60f * Deg ? -1f : 0f, 0f, 0f, 1f, false, false, Vector3.Zero));
@@ -791,7 +735,7 @@ public class FlightModuleTests
     [Fact]
     public void NoFloorPullUp_HandsOffSteepDiveIsKeptAllTheWayIntoTheGround()
     {
-        // Steep dive (about 70 degrees nose down) from 400 m, then hands off: the dive is kept, no pull-up.
+        // Steep dive (about 70 degrees nose down) from 400 m, then no input: the dive is kept, no pull-up.
         var rig = new Rig();
         float held = Climb(FlyUntil(rig, Sticks(pitch: -1f, throttle: 1f), s => Climb(s) < -70f * Deg));
         float steepest = held;
@@ -806,7 +750,7 @@ public class FlightModuleTests
         Assert.True(Climb(previous) < -60f * Deg, $"still diving steeply at the ground: {Climb(previous) / Deg} deg");
         AssertCrashedOnTheGround(rig, 0, rig.Bus.States[0], 60f);
 
-        // Inverted and pulling into a dive (a split-S), then hands off, and mouse aimed straight down: both crash.
+        // Inverted and pulling into a dive (a split-S), then let go, and mouse aimed straight down: both crash.
         rig = new Rig();
         rig.Fly(Sticks(roll: 1f), 1f);
         FlyUntil(rig, Sticks(pitch: 1f, throttle: 1f), p => Climb(p) < -60f * Deg);
@@ -868,7 +812,7 @@ public class FlightModuleTests
         var s = rig.Bus.States[0];
         Assert.True(MathF.Abs(s.Position.Y - low) < 1f, $"at {s.Position}, approach {approach}");
 
-        // ...then flies on hands off over the center: no pull-up, no crash, it keeps its height.
+        // ...then flies on with no input over the center: no pull-up, no crash, it keeps its height.
         float lowest = float.MaxValue, highest = float.MinValue;
         rig.Fly(Sticks(), 6f, p =>
         {
@@ -1041,7 +985,7 @@ public class FlightModuleTests
             FlyOrbit(rig, 1f, 6f, rise: 1f, check: p => highest = MathF.Max(highest, p.Position.Y));
             Assert.True(highest > FlightModel.PowerAltitude + 30f, $"zoomed to {highest} m");
 
-            // Then, still aiming 45 degrees up, or hands off: too little power up there, so it sinks back, smoothly.
+            // Then, still aiming 45 degrees up, or with no input: too little power up there, so it sinks back, smoothly.
             float previous = rig.Bus.States[0].Position.Y;
             void Sinks(PlaneState p)
             {
@@ -1052,13 +996,13 @@ public class FlightModuleTests
             }
             if (handsOff)
             {
-                // Hands off keeps its glide: back below 1000 m.
+                // With no input it keeps its glide: back below 1000 m.
                 // (Only until then: straight on, it would meet the border.)
                 for (int i = 0; i < 60 * 40 && rig.Bus.States[0].Position.Y >= FlightModel.PowerAltitude; i++)
                     Sinks(rig.Step(Sticks(throttle: 1f)));
                 var end = rig.Bus.States[0];
                 Assert.True(end.Alive);
-                Assert.True(end.Position.Y < FlightModel.PowerAltitude, $"hands off at {end.Position.Y} m");
+                Assert.True(end.Position.Y < FlightModel.PowerAltitude, $"no input at {end.Position.Y} m");
                 continue;
             }
             var s = FlyOrbit(rig, 1f, 40f, rise: 1f, check: Sinks);
@@ -1233,7 +1177,7 @@ public class FlightModuleTests
         // Plane 7 aims to its left: a left turn, banked left.
         Assert.True(Bank(s[7]) < -20f * Deg && Vector3.Dot(Forward(s[7]), left7) > 0.05f, "plane 7 turns toward its aim");
 
-        // Planes with no input fly on hands off, level, on their spawn heading, from full speed toward cruise.
+        // Planes with no input fly on with no input, level, on their spawn heading, from full speed toward cruise.
         foreach (int id in new[] { 2, 3, 5, 6 })
         {
             Assert.True(AngleBetween(Forward(s[id]), Vector3.Transform(-Vector3.UnitZ, SpawnOf(id).Orientation)) < 0.01f);
@@ -1307,14 +1251,19 @@ public class FlightModuleTests
     public void Damage_WingDragsThePlaneIntoARollTowardItsSide_MoreTheWorseItIs(float side)
     {
         var rig = new Rig();
-        // Plane 1 a little damaged, plane 2 badly, plane 3 healthy; all hands off.
+        // Plane 1 a little damaged, plane 2 badly, plane 3 healthy; all with no input. Nothing levels the
+        // wings, so the drift rolls them on and on: 0.4 x 0.3 x 180 = about 22 degrees a second, and 72.
         rig.Bus.Publish(side > 0 ? Health(1, right: 0.7f) : Health(1, left: 0.7f));
         rig.Bus.Publish(side > 0 ? Health(2, right: 0f) : Health(2, left: 0f));
-        rig.Run(6f);
+        rig.Run(1f);
         float light = Bank(rig.Bus.States[1]) * side, heavy = Bank(rig.Bus.States[2]) * side;
-        Assert.True(light > 5f * Deg, $"light damage: {light / Deg} deg");
-        Assert.True(heavy > light + 10f * Deg, $"heavy damage: {heavy / Deg} deg vs {light / Deg}");
+        Assert.InRange(light / Deg, 12f, 25f);
+        Assert.True(heavy > light + 30f * Deg, $"heavy damage: {heavy / Deg} deg vs {light / Deg}");
         Assert.True(MathF.Abs(Bank(rig.Bus.States[3])) < 0.5f * Deg);
+        rig.Run(1f);
+        float later = Bank(rig.Bus.States[1]) * side;
+        Assert.True(later > light + 15f * Deg, $"still rolling: {light / Deg} -> {later / Deg} deg");
+        Assert.True(MathF.Abs(Bank(rig.Bus.States[3])) < 0.5f * Deg, "a healthy plane keeps its wings level");
 
         // With the stick: the plane starts to roll toward the damaged side by itself.
         rig = new Rig();
@@ -1423,7 +1372,7 @@ public class FlightModuleTests
         }
         var state = rig.Bus.States[id];
 
-        // Undamaged again (Damage resets the parts too): it flies level hands off, at full max speed.
+        // Undamaged again (Damage resets the parts too): it flies level with no input, at full max speed.
         for (int i = 0; i < 60 * 5; i++)
         {
             rig.Bus.Publish(new ControlInput(id, 0f, 0f, 0f, 1f, false, false, Vector3.Zero));
@@ -1443,7 +1392,7 @@ public class FlightModuleTests
         new(id, repairing, PlanePart.Engine, 0f, repairing ? 1 : 0);
 
     [Fact]
-    public void Repairing_IgnoresSticksAndAim_FliesOnHandsOffKeepingItsHeading_SticksBackAtOnceAfter()
+    public void Repairing_IgnoresSticksAndAim_FliesAsWithNoInputKeepingItsAttitude_SticksBackAtOnceAfter()
     {
         // Level flight, then repairing: full stick (and mouse aim) in every direction changes nothing.
         var rig = new Rig();
@@ -1467,21 +1416,34 @@ public class FlightModuleTests
         var s = rig.Fly(Sticks(roll: 1f), 0.3f);
         Assert.True(Bank(s) > 30f * Deg, $"bank {Bank(s) / Deg} deg");
 
-        // Banked in a climb when the repair starts, stick still held: wings level at once like hands off
-        // (no 0.25 s wait), the climb is kept, the stick does nothing.
+        // Banked in a climb when the repair starts, stick still held: from then on it flies exactly as a twin with
+        // no input does (same steps, same result), keeping its bank, climb and turn; the stick does nothing.
         rig = new Rig();
-        FlyUntil(rig, Sticks(pitch: 1f), p => Climb(p) > 17f * Deg);
-        rig.Fly(Sticks(), 2f);
-        var released = FlyUntil(rig, Sticks(roll: 1f), p => Bank(p) > 45f * Deg);
-        float held = Climb(released);
+        var twin = new Rig();
+        foreach (var r in new[] { rig, twin })
+        {
+            FlyUntil(r, Sticks(pitch: 1f), p => Climb(p) > 12f * Deg);
+            r.Fly(Sticks(), 1f);
+            FlyUntil(r, Sticks(roll: 1f), p => Bank(p) > 40f * Deg);
+        }
         rig.Bus.Publish(Repair(0, true));
-        s = rig.Fly(Sticks(roll: 1f, pitch: -1f), 0.25f);
-        Assert.True(Bank(s) < Bank(released), "levelling started at once");
-        s = rig.Fly(Sticks(roll: 1f, pitch: -1f), 5f, p => Assert.True(MathF.Abs(Climb(p) - held) < 1.5f * Deg));
-        Assert.True(MathF.Abs(Bank(s)) < 0.5f * Deg, "wings level");
-        heading = Heading(s);
-        s = rig.Fly(Sticks(roll: -1f, yaw: 1f), 3f);
-        Assert.True(MathF.Abs(Heading(s) - heading) < 0.5f * Deg, "heading kept");
+        var settled = rig.Fly(Sticks(roll: 1f, pitch: -1f, yaw: 1f), 0.5f);
+        twin.Fly(Sticks(), 0.5f);
+        Assert.Equal(twin.Bus.States[0].Orientation, settled.Orientation);
+        float bank = Bank(settled);
+        climb = Climb(settled);
+        Assert.True(bank > 40f * Deg && climb > 10f * Deg, $"bank {bank / Deg}, climb {climb / Deg} deg kept");
+        foreach (var input in new[] { Sticks(roll: -1f, pitch: 1f, yaw: -1f), Aim(Vector3.Normalize(new Vector3(-1f, -0.5f, 0f))) })
+        {
+            rig.Fly(input, 2f, p =>
+            {
+                twin.Step(Sticks());
+                Assert.Equal(twin.Bus.States[0].Orientation, p.Orientation);
+                Assert.Equal(twin.Bus.States[0].Position, p.Position);
+                Assert.True(MathF.Abs(Bank(p) - bank) < 0.5f * Deg, $"bank {Bank(p) / Deg} deg");
+                Assert.True(MathF.Abs(Climb(p) - climb) < 0.5f * Deg, $"climb {Climb(p) / Deg} deg");
+            });
+        }
 
         // Another plane repairing does not touch plane 0; unknown ids are ignored.
         rig = new Rig();
@@ -1542,7 +1504,7 @@ public class FlightModuleTests
     public void Collision_TwoPlanesOnACollisionCourseSeparateAfterTheirImpulses_ThenFlyOn()
     {
         var rig = new Rig();
-        // Planes 0 and 4 fly on hands off, level, at the same speed: put plane 4 where it meets plane 0 at a point
+        // Planes 0 and 4 fly on with no input, level, at the same speed: put plane 4 where it meets plane 0 at a point
         // 0.15 x HalfSize ahead of it, 3 m aside across their closing course: a glancing collision.
         FlightModel p0 = rig.Module.Plane(0), p4 = rig.Module.Plane(4);
         Vector3 meet = p0.Position + p0.Forward * (0.15f * Half);
@@ -1672,29 +1634,24 @@ public class FlightModuleTests
     [Theory]
     [InlineData(1f)]
     [InlineData(-1f)]
-    public void Collision_RollKickRollsThePlane_ThenHandsOffRecovers(float side)
+    public void Collision_RollKickRollsThePlane_ThenTheBankStays(float side)
     {
         var rig = new Rig();
         rig.Run(1f);
         // A wingtip strike: positive roll raises the right wing (rolls left, negative bank).
         rig.Bus.Publish(new CollisionImpulse(0, Vector3.Zero, new Vector3(0f, 0f, 4f * side), Vector3.Zero));
-        float most = 0f, previous = 0f, t = 0f, recovered = -1f;
-        rig.Run(5f, () =>
+        float previous = 0f;
+        rig.Run(2f, () =>
         {
-            t += 1f / 60f;
             float bank = Bank(rig.Bus.States[0]);
             Assert.True(MathF.Abs(bank - previous) < 5f * Deg, "rolls smoothly");
+            Assert.True(-bank * side > -0.5f * Deg, "only the kick's way");
             previous = bank;
-            most = MathF.Max(most, -bank * side);
-            if (recovered < 0f && t > 0.5f && MathF.Abs(bank) < 3f * Deg)
-                recovered = t;
-            Assert.True(-bank * side > -5f * Deg, "no overshoot past level");
         });
-        Assert.InRange(most, 25f * Deg, 70f * Deg); // a brief roll away (4 rad/s x 0.3 s = 69 degrees, less the levelling)
-        Assert.InRange(recovered, 1f, 4.5f);
-        var s = rig.Bus.States[0];
-        Assert.True(MathF.Abs(Bank(s)) < 2f * Deg, "wings level again");
-        Assert.True(MathF.Abs(Climb(s)) < 2f * Deg, "still level");
+        // A brief roll away (4 rad/s fading over 0.3 s: about 69 degrees); no input, so nothing rolls it back.
+        float knocked = -Bank(rig.Bus.States[0]) * side;
+        Assert.InRange(knocked / Deg, 50f, 75f);
+        rig.Run(3f, () => Assert.True(MathF.Abs(-Bank(rig.Bus.States[0]) * side - knocked) < 0.5f * Deg, "the bank stays"));
         Assert.Equal(Vector3.Zero, rig.Module.Plane(0).Kick);
     }
 
@@ -1715,15 +1672,15 @@ public class FlightModuleTests
         s = held.Fly(Sticks(roll: 1f), 0.5f);
         Assert.True(Bank(s) > 0f, "the stick wins once the kick fades");
 
-        // A pitch kick raises the nose; hands off then takes back the climb it had (level).
+        // A pitch kick raises the nose; with no input the new climb is kept.
         var rig = new Rig();
         rig.Run(1f);
         rig.Bus.Publish(new CollisionImpulse(0, Vector3.Zero, new Vector3(1.5f, 0f, 0f), Vector3.Zero));
         float highest = 0f;
         rig.Run(1f, () => highest = MathF.Max(highest, Climb(rig.Bus.States[0])));
         Assert.True(highest > 8f * Deg, $"nose knocked up: {highest / Deg} deg");
-        rig.Run(5f);
-        Assert.True(MathF.Abs(Climb(rig.Bus.States[0])) < 2f * Deg, "back to level");
+        float knockedClimb = Climb(rig.Bus.States[0]);
+        rig.Run(3f, () => Assert.True(MathF.Abs(Climb(rig.Bus.States[0]) - knockedClimb) < 0.5f * Deg, "the climb stays"));
     }
 
     [Fact]

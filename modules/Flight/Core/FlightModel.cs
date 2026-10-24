@@ -71,15 +71,6 @@ public sealed class FlightModel
 
     public const float MaxAimBank = 75f * Deg;
 
-    /// <summary>Sticks inside this (each of pitch, roll, yaw) count as hands off.</summary>
-    public const float HandsOffDeadZone = 0.05f;
-    /// <summary>Hands off this long (s) before the plane starts levelling itself.</summary>
-    public const float HandsOffDelay = 0.25f;
-    /// <summary>Time constant (s) of the hands-off levelling: the bank left (and any drift off the held climb) shrinks by e each this long.</summary>
-    public const float LevelTimeConstant = 0.6f;
-    /// <summary>Largest stick the levelling uses for roll and pitch, so it stays gentle from far off level.</summary>
-    public const float LevelMaxRoll = 0.5f;
-    public const float LevelMaxPitch = 0.6f;
 
     /// <summary>Spawns: Allies on the south half (+Z), Central on the north half (-Z), between these shares of
     /// <see cref="WorldBounds.HalfSize"/> from the center line...</summary>
@@ -126,9 +117,6 @@ public sealed class FlightModel
     private float _speed;
     private float _throttle;
     private float _pitchCmd, _rollCmd, _yawCmd;
-    private float _handsOffTime;
-    /// <summary>Climb angle (rad) hands off keeps: the one at the release of the sticks, or the one a guard left.</summary>
-    private float _holdClimb;
     private float _engine = 1f, _leftWing = 1f, _rightWing = 1f, _tail = 1f;
     private bool _alive = true;
     private bool _grounded;
@@ -246,7 +234,7 @@ public sealed class FlightModel
         _tail = Health(tail);
     }
 
-    /// <summary>True while the pilot repairs in flight: their pitch, roll, yaw and aim are ignored (hands off).</summary>
+    /// <summary>True while the pilot repairs in flight: their pitch, roll, yaw and aim are ignored, as with no input.</summary>
     public bool Repairing => _repairing;
 
     /// <summary>In-flight repair on or off (Damage's <c>RepairState.Repairing</c>).</summary>
@@ -305,8 +293,6 @@ public sealed class FlightModel
         _repairing = false;
         _engine = _leftWing = _rightWing = _tail = 1f;
         _pitchCmd = _rollCmd = _yawCmd = 0f;
-        _handsOffTime = 0f;
-        _holdClimb = 0f;
         _knock = _kick = Vector3.Zero;
         _respawnCount++;
         Place();
@@ -352,24 +338,17 @@ public sealed class FlightModel
 
         Vector3 forward = Vector3.Transform(-Vector3.UnitZ, _orientation);
 
-        // Repairing: the pilot's steering is ignored, the plane flies on hands off at once (throttle still works).
-        bool handsOff = _repairing || !input.HasAim && MathF.Abs(input.Pitch) < HandsOffDeadZone
-            && MathF.Abs(input.Roll) < HandsOffDeadZone && MathF.Abs(input.Yaw) < HandsOffDeadZone;
         float climb = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
-        if (handsOff && _handsOffTime == 0f)
-            _holdClimb = climb; // the sticks were just let go: keep this climb or dive
-        _handsOffTime = handsOff ? _handsOffTime + dt : 0f;
 
+        // No stick input means no correction at all: the plane keeps its attitude and turn.
+        // Repairing: the pilot's steering is ignored, exactly as with no input (throttle still works).
         float pitch, roll, yaw;
         if (GuardDirection(forward, out Vector3 guard))
-        {
             Steer(guard, out pitch, out roll, out yaw);
-            _holdClimb = climb; // once clear, hands off keeps what the guard left
-        }
-        else if (input.HasAim && !_repairing)
+        else if (_repairing)
+            pitch = roll = yaw = 0f;
+        else if (input.HasAim)
             Steer(input.AimDirection, out pitch, out roll, out yaw);
-        else if (_repairing || _handsOffTime >= HandsOffDelay)
-            Level(climb, out pitch, out roll, out yaw);
         else
         {
             pitch = input.Pitch;
@@ -397,7 +376,7 @@ public sealed class FlightModel
         Quaternion body = Quaternion.CreateFromAxisAngle(Vector3.UnitX, _pitchCmd * PitchRate * tail * dt)
             * Quaternion.CreateFromAxisAngle(Vector3.UnitZ, -_rollCmd * RollRate * dt)
             * Quaternion.CreateFromAxisAngle(Vector3.UnitY, -_yawCmd * YawRate * tail * dt);
-        // A collision's spin turns the plane on top of that (the pilot or hands off then works against it).
+        // A collision's spin turns the plane on top of that (only the pilot can work against it).
         float kick = _kick.Length();
         if (kick > 0f)
             body *= Quaternion.CreateFromAxisAngle(_kick / kick, kick * dt);
@@ -560,28 +539,6 @@ public sealed class FlightModel
         else if (gain < -1e-3f)
             pitch = MathF.Max(pitch, wantedRate / gain);
         pitch = Math.Clamp(pitch, -1f, 1f);
-        // Hands off keeps no climb above the limit (too steep for the speed).
-        _holdClimb = MathF.Min(_holdClimb, maxClimb);
-    }
-
-    /// <summary>
-    /// Hands-off levelling: roll back to wings level the shorter way, at a rate proportional to
-    /// what is left (so it slows near level and does not overshoot). The nose is not levelled:
-    /// it keeps <see cref="_holdClimb"/>, the climb or dive it had when the sticks were let go,
-    /// only taking back the little the stick's lag adds after the release (pitch waits for the
-    /// wings to be within 90 degrees of level). Heading is kept: no yaw.
-    /// </summary>
-    private void Level(float climb, out float pitch, out float roll, out float yaw)
-    {
-        Vector3 right = Vector3.Transform(Vector3.UnitX, _orientation);
-        Vector3 up = Vector3.Transform(Vector3.UnitY, _orientation);
-
-        float bank = MathF.Atan2(-right.Y, up.Y); // positive: rolled right; -pi..pi, so -bank is the shorter way
-        roll = Math.Clamp(-bank / (LevelTimeConstant * RollRate), -LevelMaxRoll, LevelMaxRoll);
-
-        float wingsLevel = MathF.Max(0f, MathF.Cos(bank));
-        pitch = Math.Clamp((_holdClimb - climb) / (LevelTimeConstant * PitchRate), -LevelMaxPitch, LevelMaxPitch) * wingsLevel;
-        yaw = 0f;
     }
 
     /// <summary>

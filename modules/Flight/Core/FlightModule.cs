@@ -26,7 +26,7 @@ public sealed class FlightModule : IModule, IMessageHandler<ControlInput>, IMess
         for (int id = 0; id < Teams.PlaneCount; id++)
         {
             _models[id] = new FlightModel(id);
-            // Until the first input arrives: hands off, cruise throttle.
+            // Until the first input arrives: no stick input, cruise throttle.
             _inputs[id] = new ControlInput(id, 0f, 0f, 0f, FlightModel.CruiseThrottle, false, false, Vector3.Zero);
         }
     }
