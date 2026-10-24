@@ -303,47 +303,61 @@ public class FlightModuleTests
     }
 
     [Fact]
-    public void HandsOff_ClimbOrDiveEasesBackToTheHorizonKeepingHeading()
+    public void HandsOff_ClimbOrDiveKeepsItsPitchAngleAndHeading()
     {
         foreach (float side in new[] { 1f, -1f })
         {
             var rig = new Rig();
-            float heading = Heading(FlyUntil(rig, Sticks(pitch: side), s => MathF.Abs(Climb(s)) > 25f * Deg));
-            float peak = 0f, previous = 0f, settledAt = float.NaN, t = 0f;
-            bool falling = false;
-            rig.Fly(Sticks(), 5f, s =>
+            var released = FlyUntil(rig, Sticks(pitch: side), s => MathF.Abs(Climb(s)) > 25f * Deg);
+            float held = Climb(released), heading = Heading(released), t = 0f;
+            rig.Fly(Sticks(), 8f, s =>
             {
                 t += (float)Dt;
-                float climb = Climb(s) * side;
-                Assert.True(climb > -0.5f * Deg, $"overshot the horizon: {climb / Deg} deg");
-                if (falling)
-                    Assert.True(climb <= previous + 0.01f * Deg, $"wobbled: {previous / Deg} -> {climb / Deg} deg");
-                else if (climb < previous)
-                    falling = true;
-                peak = MathF.Max(peak, climb);
-                previous = climb;
-                if (float.IsNaN(settledAt) && falling && climb < 2f * Deg)
-                    settledAt = t;
+                float off = MathF.Abs(Climb(s) - held);
+                // Only the stick's lag nudges it right after the release; then it holds within a degree.
+                Assert.True(off < (t < 1.5f ? 6f : 1f) * Deg, $"at {t} s: climb {Climb(s) / Deg} deg, held {held / Deg} deg");
                 Assert.True(MathF.Abs(Heading(s) - heading) < 0.5f * Deg, "heading kept");
                 Assert.True(MathF.Abs(Bank(s)) < 0.5f * Deg, "wings stay level");
             });
-            Assert.InRange(peak / Deg, 28f, 35f); // about a 30 degree climb or dive
-            Assert.InRange(settledAt, 1.5f, 3f);
-            Assert.True(MathF.Abs(Climb(rig.Bus.States[0])) < 0.5f * Deg);
+            Assert.True(MathF.Abs(Climb(rig.Bus.States[0]) - held) < 0.5f * Deg);
+            Assert.True(MathF.Abs(held) > 25f * Deg, "still climbing or diving, not pulled to the horizon");
         }
+    }
+
+    [Theory]
+    [InlineData(1f)]
+    [InlineData(-1f)]
+    public void HandsOff_BankedClimbOrDiveLevelsItsWingsButKeepsItsPitchAngle(float side)
+    {
+        var rig = new Rig();
+        // A 20 degree climb or dive, then a 45 degree bank: let go.
+        FlyUntil(rig, Sticks(pitch: side), s => MathF.Abs(Climb(s)) > 17f * Deg);
+        rig.Fly(Sticks(), 2f);
+        var released = FlyUntil(rig, Sticks(roll: 1f), s => Bank(s) > 45f * Deg);
+        float held = Climb(released);
+        Assert.InRange(held * side / Deg, 16f, 22f);
+        var end = rig.Fly(Sticks(), 5f, s =>
+        {
+            Assert.True(MathF.Abs(Climb(s) - held) < 1.5f * Deg, $"climb {Climb(s) / Deg} deg, held {held / Deg} deg");
+            Assert.True(Bank(s) > -0.5f * Deg, "no overshoot past wings level");
+        });
+        Assert.True(MathF.Abs(Bank(end)) < 0.5f * Deg, "wings level");
+        Assert.True(MathF.Abs(Climb(end) - held) < 1f * Deg, "pitch angle kept");
     }
 
     [Fact]
     public void HandsOff_WaitsAShortMomentAndCountsTinySticksAsHandsOff()
     {
         var rig = new Rig();
-        float climb = Climb(FlyUntil(rig, Sticks(pitch: 1f), s => Climb(s) > 25f * Deg));
-        // For the first 0.2 s after letting go nothing pulls the nose down (it even rises a bit with the stick's lag).
-        Assert.True(Climb(rig.Fly(Sticks(), 0.2f)) >= climb);
-        // Sticks inside the dead zone are hands off: it levels.
+        FlyUntil(rig, Sticks(roll: 1f), s => Bank(s) > 40f * Deg);
+        float bank = Bank(rig.Bus.States[0]);
+        // For the first 0.2 s after letting go nothing rolls the wings back (they even roll on a bit with the stick's lag).
+        Assert.True(Bank(rig.Fly(Sticks(), 0.2f)) >= bank);
+        // Sticks inside the dead zone are hands off: it levels its wings and keeps its climb.
+        float climb = Climb(rig.Bus.States[0]);
         var s = rig.Fly(Sticks(pitch: 0.03f, roll: -0.04f, yaw: 0.04f), 4f);
-        Assert.True(MathF.Abs(Climb(s)) < 1f * Deg);
         Assert.True(MathF.Abs(Bank(s)) < 1f * Deg);
+        Assert.True(MathF.Abs(Climb(s) - climb) < 1f * Deg);
     }
 
     [Fact]
@@ -361,10 +375,20 @@ public class FlightModuleTests
         // A small stick just outside the dead zone holds the plane off level for as long as it is held.
         rig.Fly(Sticks(pitch: 0.06f), 3f, p => Assert.True(Bank(p) > bank, "no levelling while a stick is held"));
 
-        // Let go: it levels again.
+        // Let go: it levels its wings again, keeping the climb it had at the release.
+        float climb = Climb(rig.Bus.States[0]);
         s = rig.Fly(Sticks(), 4f);
         Assert.True(MathF.Abs(Bank(s)) < 1f * Deg);
-        Assert.True(MathF.Abs(Climb(s)) < 1f * Deg);
+        Assert.True(MathF.Abs(Climb(s) - climb) < 2f * Deg, $"climb {climb / Deg} -> {Climb(s) / Deg} deg");
+
+        // Holding a climb hands off, the pitch stick takes over at once (and the nose is free to go anywhere).
+        rig = new Rig();
+        FlyUntil(rig, Sticks(pitch: 1f), p => Climb(p) > 20f * Deg);
+        float held = Climb(rig.Fly(Sticks(), 3f));
+        s = rig.Fly(Sticks(pitch: -1f), 0.5f);
+        Assert.True(Climb(s) < held - 15f * Deg, $"{held / Deg} -> {Climb(s) / Deg} deg");
+        s = rig.Fly(Sticks(pitch: 1f), 1f);
+        Assert.True(Climb(s) > held + 20f * Deg, $"{held / Deg} -> {Climb(s) / Deg} deg");
 
         // Mouse aim is never levelled: it keeps a climb aimed at.
         rig = new Rig();
@@ -396,17 +420,23 @@ public class FlightModuleTests
     }
 
     [Fact]
-    public void HandsOff_RecoversFromASteepDiveAboveTheFloor()
+    public void HandsOff_SteepDiveKeepsDivingUntilTheFloorGuardPullsUp()
     {
-        // Steep dive (about 70 degrees nose down) from 400 m, then hands off.
+        // Steep dive (about 70 degrees nose down) from 400 m, then hands off: the dive is kept...
         var rig = new Rig();
-        FlyUntil(rig, Sticks(pitch: -1f, throttle: 1f), s => Climb(s) < -70f * Deg);
+        float held = Climb(FlyUntil(rig, Sticks(pitch: -1f, throttle: 1f), s => Climb(s) < -70f * Deg));
+        var s = rig.Fly(Sticks(throttle: 1f), 1f);
+        Assert.True(MathF.Abs(Climb(s) - held) < 6f * Deg, $"dive kept: {held / Deg} -> {Climb(s) / Deg} deg");
+        // ...until the floor guard pulls up; then it keeps the climb the guard left (level at least), never diving back.
         float lowest = float.MaxValue;
-        var s = rig.Fly(Sticks(throttle: 1f), 6f, p => lowest = MathF.Min(lowest, p.Position.Y));
-        Assert.True(lowest > 250f, $"pulled out by itself, well above the floor guard ({lowest} m)");
-        Assert.True(MathF.Abs(Climb(s)) < 1f * Deg);
+        s = rig.Fly(Sticks(throttle: 1f), 8f, p => lowest = MathF.Min(lowest, p.Position.Y));
+        Assert.True(lowest > FlightModel.FloorAltitude + 1f, $"at {lowest} m");
+        float climb = Climb(s);
+        Assert.True(climb > -1f * Deg, $"not diving back: {climb / Deg} deg");
+        s = rig.Fly(Sticks(throttle: 1f), 3f);
+        Assert.True(MathF.Abs(Climb(s) - climb) < 1f * Deg, $"{climb / Deg} -> {Climb(s) / Deg} deg");
 
-        // Inverted steep dive held into the floor guard, then let go: the floor still wins, then it levels.
+        // Inverted steep dive held into the floor guard, then let go: the floor still wins, then the wings level.
         rig = new Rig();
         rig.Fly(Sticks(roll: 1f), 1f);
         rig.Fly(Sticks(pitch: 1f, throttle: 1f), 3f);
@@ -414,7 +444,7 @@ public class FlightModuleTests
         s = rig.Fly(Sticks(throttle: 1f), 12f, p => lowest = MathF.Min(lowest, p.Position.Y));
         Assert.True(lowest > FlightModel.FloorAltitude + 1f, $"at {lowest} m");
         Assert.True(MathF.Abs(Bank(s)) < 1f * Deg, $"bank {Bank(s) / Deg} climb {Climb(s) / Deg} at {s.Position}");
-        Assert.True(MathF.Abs(Climb(s)) < 1f * Deg);
+        Assert.True(Climb(s) > -1f * Deg, "not diving back into the floor");
     }
 
     [Fact]

@@ -19,7 +19,7 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
     others: the old six-argument constructor still works and means `Alive` true.
 - **Input**: subscribes to `Neo.Input.ControlInput` (modules/Input/Contract); each plane uses
   the latest one with its `PlaneId`; ids outside 0..7 are ignored. Before any arrives for a
-  plane: hands off (it levels itself), throttle 0.5.
+  plane: hands off (it flies on level, as it started), throttle 0.5.
 - **Damage**: subscribes to `Neo.Damage.PlaneDamageState`, `PlaneDestroyed` and
   `PlaneRespawn` (modules/Damage/Contract); see "Damage" below.
 - **Core** (`Core/`): `FlightModule` (the `IModule`) keeps one `FlightModel` per plane
@@ -40,14 +40,18 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
   40 deg/s; commands are smoothed (15/s) so rates are snappy but never jump. A banked plane
   also turns about world up (30 deg/s at 90 degrees of bank).
 - **Hands off** (no `HasAim`, and `Pitch`, `Roll`, `Yaw` all inside a 0.05 dead zone for
-  0.25 s): the plane levels itself, like an easy arcade plane. It rolls back to wings level
-  the shorter way (so from inverted it rolls back the way it came) and eases its nose back
-  to the horizon, each at a rate proportional to what is left (time constant 0.6 s, capped
-  at half roll stick and 0.6 pitch stick): about 2 s to settle from a 45 degree bank or a
-  30 degree climb, slowing near level, no overshoot. Pitch waits until the wings are within
-  90 degrees of level. No yaw: the heading is kept (a bank still turns the plane while it
-  rolls out). Any stick outside the dead zone takes over at once; levelling resumes 0.25 s
-  after letting go. The floor and border guards still win.
+  0.25 s): the plane levels its wings, like an easy arcade plane, but not its nose. It rolls
+  back to wings level the shorter way (so from inverted it rolls back the way it came), at a
+  rate proportional to what is left (time constant 0.6 s, capped at half roll stick): about
+  2 s to settle from a 45 degree bank, slowing near level, no overshoot. The nose keeps the
+  climb or dive it had when the sticks were let go (within a degree): the few degrees the
+  stick's lag adds just after the release are eased back (same time constant, capped at 0.6
+  pitch stick, only while the wings are within 90 degrees of level). No yaw: the heading is
+  kept (a bank still turns the plane while it rolls out). Any stick outside the dead zone
+  takes over at once; levelling resumes 0.25 s after letting go. The floor and border guards
+  still win; once clear, hands off keeps the climb or dive the guard left (after a floor
+  pull-up at least level, never a dive), so a plane let go in a dive dives until the floor
+  guard pulls it up.
 - **Mouse aim** (`HasAim`): an autopilot steers smoothly toward `AimDirection`, like War
   Thunder: it banks toward the target's heading (up to 75 degrees), pulls toward it and
   fine-tunes with yaw; wings come level once the target is ahead. Pilot sticks are ignored.
@@ -81,9 +85,10 @@ Each plane keeps the latest part health from `PlaneDamageState` (0..1, 1 undamag
 `Tests/FlightModuleTests.cs`, with a fake bus (`TestBus`) that publishes fake
 `ControlInput`s: start state, speeds stay in 25..60 (cruise, max, min, dives, climbs,
 random flying), aim steering converges smoothly and banks into turns, rolls are quicker
-than pitch and yaw, hands-off levelling (banks, climbs and dives settle in 2 to 3 s
-without overshoot or wobble, heading kept, the short delay and dead zone, sticks override
-at once, inverted rights itself the shorter way, steep dives recover above the floor),
+than pitch and yaw, hands-off levelling (banks settle in 2 to 3 s without overshoot or
+wobble; climbs and dives, banked or not, keep their pitch angle within a degree and their
+heading; the short delay and dead zone, sticks override at once, inverted rights itself the
+shorter way, a steep dive is kept until the floor guard pulls up, never diving back),
 floor and border hold, determinism (with damage, downing and respawn), no allocations per
 tick; eight planes start by team and are published every tick in id order, four planes fly
 from their own inputs (others hands off), the `Teams` helper, `PlaneState.Alive` with the
