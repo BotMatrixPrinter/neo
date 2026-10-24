@@ -30,15 +30,26 @@ public sealed class TargetsModule : IModule
     /// <summary>Least distance (m) from a balloon's tether point to the nearest water.</summary>
     public const float ShoreMargin = 30f;
 
-    // Wanted tether spots spread around the 4 km x 4 km area centered on the origin, 300 to 500
-    // m up; PlaceOnDryGround moves them off water and up to clear the terrain.
+    /// <summary>
+    /// Least distance from a tether point to the edge of the playable area, as a fraction of
+    /// <see cref="WorldBounds.HalfSize"/>: every tether point lies within
+    /// <see cref="MaxReach"/> of the origin on X and Z.
+    /// </summary>
+    public const float EdgeMarginFraction = 0.2f;
+
+    /// <summary>Farthest a tether point lies from the origin on X or Z (m).</summary>
+    public static float MaxReach => (1f - EdgeMarginFraction) * WorldBounds.HalfSize;
+
+    // Wanted tether spots, X and Z as fractions of WorldBounds.HalfSize, Y in meters (300 to
+    // 500 m up): one over the center, two toward each side (the teams start on -Z and +Z).
+    // PlaceOnDryGround moves them off water and up to clear the terrain.
     private static readonly Vector3[] WantedSpots =
     {
-        new(150f, 340f, -700f),
-        new(-1450f, 420f, -1300f),
-        new(1400f, 470f, -1450f),
-        new(-1300f, 380f, 1250f),
-        new(1450f, 450f, 1100f),
+        new(0f, 340f, 0f),
+        new(-0.55f, 420f, -0.55f),
+        new(0.55f, 470f, -0.55f),
+        new(-0.55f, 380f, 0.55f),
+        new(0.55f, 450f, 0.55f),
     };
 
     private static readonly Vector3[] Spots = new Vector3[Count];
@@ -48,7 +59,8 @@ public sealed class TargetsModule : IModule
     {
         for (int i = 0; i < Count; i++)
         {
-            Spots[i] = PlaceOnDryGround(WantedSpots[i]);
+            var w = WantedSpots[i];
+            Spots[i] = PlaceOnDryGround(new Vector3(w.X * WorldBounds.HalfSize, w.Y, w.Z * WorldBounds.HalfSize));
             Grounds[i] = new Vector3(Spots[i].X, Terrain.HeightAt(Spots[i].X, Spots[i].Z), Spots[i].Z);
         }
     }
@@ -84,13 +96,16 @@ public sealed class TargetsModule : IModule
 
     /// <summary>
     /// The tether spot used for <paramref name="wanted"/>: the nearest point (searched in 10 m
-    /// rings, up to 600 m out) whose ground is dry for <see cref="ShoreMargin"/> m around, at
+    /// rings, up to 600 m out, never farther than <see cref="MaxReach"/> from the origin on X or Z)
+    /// whose ground is dry for <see cref="ShoreMargin"/> m around, at
     /// the wanted height or higher, so that it stays <see cref="MinClearance"/> m (plus room for
     /// the sway) above the highest ground within 20 m.
     /// </summary>
     public static Vector3 PlaceOnDryGround(Vector3 wanted)
     {
-        float x = wanted.X, z = wanted.Z;
+        float reach = MaxReach;
+        float x = Math.Clamp(wanted.X, -reach, reach), z = Math.Clamp(wanted.Z, -reach, reach);
+        float wx = x, wz = z;
         for (int ring = 0; ring <= 60; ring++)
         {
             float r = ring * 10f;
@@ -99,8 +114,8 @@ public sealed class TargetsModule : IModule
             for (int d = 0; d < directions && !found; d++)
             {
                 float a = d * MathF.Tau / directions;
-                float cx = wanted.X + r * MathF.Cos(a), cz = wanted.Z + r * MathF.Sin(a);
-                if (DryAround(cx, cz))
+                float cx = wx + r * MathF.Cos(a), cz = wz + r * MathF.Sin(a);
+                if (MathF.Abs(cx) <= reach && MathF.Abs(cz) <= reach && DryAround(cx, cz))
                 {
                     x = cx;
                     z = cz;

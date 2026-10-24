@@ -15,11 +15,14 @@ of `Radius` (9 m) around `Position`.
 
 ## Core (`Core/`)
 
-`TargetsModule` (the `IModule`): 5 balloons tethered around the 4 km x 4 km area centered on
-the origin, 340 to 470 m up, each swaying under 2 m around its tether point. The tether
-points come from World's `Terrain` (its Contract, `Neo.World`): `PlaceOnDryGround` moves a
-wanted spot over water (or within 30 m of it, `ShoreMargin`) to the nearest dry spot, in
-10 m rings, and raises it if needed so the balloon stays at least 150 m (`MinClearance`)
+`TargetsModule` (the `IModule`): 5 balloons tethered over the playable area (World's
+`WorldBounds.HalfSize`, read at run time; no copy of the map size here), 340 to 470 m up: one
+over the center and two toward each side (the teams start on -Z and +Z), their wanted spots
+written as fractions of `HalfSize` (+-0.55 on X and Z for the four side ones), every tether point at
+least 0.2 x `HalfSize` inside the edge (`EdgeMarginFraction`; within `MaxReach` of the origin on X and Z), each swaying under 2 m around its tether point. The tether
+points come from World's `Terrain` (its Contract, `Neo.World`): `PlaceOnDryGround` brings a
+wanted spot inside `MaxReach` and moves it, if over water (or within 30 m of it, `ShoreMargin`), to
+the nearest dry spot inside `MaxReach`, in 10 m rings, and raises it if needed so the balloon stays at least 150 m (`MinClearance`)
 above the terrain under it. `Anchor(id)` is where its cable is anchored: the ground
 (`Terrain.HeightAt`) under its tether point. Each has 15
 health; `DamageTarget` lowers it; at 0 it publishes `TargetDestroyed`, counts a pop
@@ -51,8 +54,12 @@ popping, `FRAMES=118 ./screenshot.sh modules/Targets/Godot/Main.tscn Targets-pop
 `TargetsModuleTests` (with a fake bus): damage and destruction, one `TargetDestroyed` per
 pop with the shooter of the last hit (-1 when unknown), respawn after exactly 60 s at full
 health, the view state (`BalloonViews`: hidden while popped, shown again at its spot when
-back), states published every tick, placement and sway, cables anchored at
-`Terrain.HeightAt` under each balloon, no balloon over water (a spot over a lake or the river
-moves to dry ground), at least 150 m above the terrain, no allocations.
+back), states published every tick, placement and sway (inside the area 0.2 x `HalfSize` from
+the edge, at least 0.4 x `HalfSize` apart, two balloons on each side and one at the center), cables
+anchored at `Terrain.HeightAt` under each balloon, no balloon over water (every water spot found by
+sampling the area moves to dry ground inside it; a spot outside the area is brought in), at least
+150 m above the terrain (the highest dry ground, found by sampling `Terrain.HeightAt`, raises a
+balloon wanted too low), no allocations. Every test position is a fraction of
+`WorldBounds.HalfSize` or found by sampling the terrain, so the tests hold for any map size.
 
 Test it alone: `./test.sh Targets`.

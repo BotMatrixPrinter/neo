@@ -78,6 +78,9 @@ public class TargetsModuleTests
     public void BalloonsAreSpreadOverTheAreaAt300To500MetersAndSwaySlightly()
     {
         var (targets, _) = Started();
+        float h = WorldBounds.HalfSize;
+        float inside = 0.8f * h; // at least 0.2 x HalfSize inside the edge
+        Assert.Equal(inside, TargetsModule.MaxReach);
         var first = new Vector3[TargetsModule.Count];
         for (int id = 0; id < TargetsModule.Count; id++)
             first[id] = targets.GetState(id).Position;
@@ -89,8 +92,8 @@ public class TargetsModuleTests
             for (int id = 0; id < TargetsModule.Count; id++)
             {
                 var p = targets.GetState(id).Position;
-                Assert.InRange(p.X, -2000f, 2000f);
-                Assert.InRange(p.Z, -2000f, 2000f);
+                Assert.InRange(p.X, -inside - 2f, inside + 2f);
+                Assert.InRange(p.Z, -inside - 2f, inside + 2f);
                 Assert.InRange(p.Y, 300f, 500f);
                 float sway = Vector3.Distance(p, first[id]);
                 Assert.True(sway < 5f, $"balloon {id} drifted {sway} m");
@@ -99,13 +102,35 @@ public class TargetsModuleTests
         }
         Assert.True(maxSway > 0.5f, "balloons should sway");
 
+        // Tether points (and anchors) inside the area too, with the edge margin.
+        for (int id = 0; id < TargetsModule.Count; id++)
+        {
+            var anchor = TargetsModule.Anchor(id);
+            Assert.InRange(anchor.X, -inside, inside);
+            Assert.InRange(anchor.Z, -inside, inside);
+        }
+
         for (int a = 0; a < TargetsModule.Count; a++)
             for (int b = a + 1; b < TargetsModule.Count; b++)
             {
                 var flatA = new Vector2(first[a].X, first[a].Z);
                 var flatB = new Vector2(first[b].X, first[b].Z);
-                Assert.True(Vector2.Distance(flatA, flatB) > 800f, $"balloons {a} and {b} are too close");
+                float apart = Vector2.Distance(flatA, flatB);
+                Assert.True(apart > 0.4f * h, $"balloons {a} and {b} are only {apart} m apart");
             }
+
+        // Both sides (the teams start on -Z and +Z) get two balloons, one is near the center.
+        int south = 0, north = 0, central = 0;
+        for (int id = 0; id < TargetsModule.Count; id++)
+        {
+            var p = first[id];
+            if (p.Z < -0.3f * h) south++;
+            if (p.Z > 0.3f * h) north++;
+            if (new Vector2(p.X, p.Z).Length() < 0.25f * h) central++;
+        }
+        Assert.Equal(2, south);
+        Assert.Equal(2, north);
+        Assert.Equal(1, central);
     }
 
     [Fact]
@@ -132,18 +157,15 @@ public class TargetsModuleTests
         var (targets, _) = Started();
         var views = new BalloonViews(targets);
         var anchors = new Vector3[TargetsModule.Count];
-        bool someAboveSeaLevel = false;
         for (int id = 0; id < TargetsModule.Count; id++)
         {
             var anchor = TargetsModule.Anchor(id);
             anchors[id] = anchor;
             Assert.Equal(Terrain.HeightAt(anchor.X, anchor.Z), anchor.Y);
             Assert.False(Terrain.IsWater(anchor.X, anchor.Z), $"balloon {id}'s winch stands in water");
-            someAboveSeaLevel |= anchor.Y > 10f; // on a hill, not at y = 0 as it used to be
             var p = targets.GetState(id).Position;
             Assert.True(new Vector2(p.X - anchor.X, p.Z - anchor.Z).Length() < 3f, $"balloon {id} is not above its anchor");
         }
-        Assert.True(someAboveSeaLevel);
 
         for (int i = 0; i < 600; i++)
         {
@@ -158,34 +180,90 @@ public class TargetsModuleTests
         }
     }
 
-    [Theory]
-    [InlineData(-700f, -900f)] // the middle of the west lake
-    [InlineData(850f, 1150f)] // the middle of the east lake
-    [InlineData(0f, 0f)] // on the river (x = its center line at z = 0)
-    public void ASpotOverWaterIsMovedSlightlyToDryGround(float x, float z)
+    // Grid points over the area inside the edge margin, every 5 % of HalfSize.
+    private static System.Collections.Generic.IEnumerable<(float X, float Z)> AreaSamples()
     {
-        if (x == 0f)
-            x = Terrain.RiverX(z);
-        Assert.True(Terrain.IsWater(x, z));
-        var spot = TargetsModule.PlaceOnDryGround(new Vector3(x, 400f, z));
-        Assert.False(Terrain.IsWater(spot.X, spot.Z));
-        Assert.True(Terrain.WaterDepthAt(spot.X, spot.Z) == 0f);
-        float moved = new Vector2(spot.X - x, spot.Z - z).Length();
-        Assert.InRange(moved, 1f, 400f);
-        Assert.Equal(400f, spot.Y);
+        float reach = TargetsModule.MaxReach, step = 0.05f * WorldBounds.HalfSize;
+        for (float x = -reach; x <= reach + 0.1f; x += step)
+            for (float z = -reach; z <= reach + 0.1f; z += step)
+                yield return (x, z);
+    }
+
+    [Fact]
+    public void ASpotOverWaterIsMovedSlightlyToDryGroundInsideTheArea()
+    {
+        float reach = TargetsModule.MaxReach;
+        int wet = 0;
+        var spots = new System.Collections.Generic.List<(float X, float Z)>(AreaSamples());
+        spots.Add((Terrain.RiverX(0f), 0f)); // on the river's center line
+        foreach (var (x, z) in spots)
+        {
+            if (!Terrain.IsWater(x, z))
+                continue;
+            wet++;
+            var spot = TargetsModule.PlaceOnDryGround(new Vector3(x, 400f, z));
+            Assert.False(Terrain.IsWater(spot.X, spot.Z), $"({x}, {z}) stayed over water");
+            Assert.True(Terrain.WaterDepthAt(spot.X, spot.Z) == 0f);
+            float moved = new Vector2(spot.X - x, spot.Z - z).Length();
+            Assert.InRange(moved, 1f, 600f);
+            Assert.InRange(spot.X, -reach, reach);
+            Assert.InRange(spot.Z, -reach, reach);
+            Assert.True(spot.Y >= 400f);
+            Assert.True(spot.Y - Terrain.HeightAt(spot.X, spot.Z) >= 150f);
+        }
+        Assert.True(wet > 3, "the area should have some water (river, lakes) to test against");
+    }
+
+    [Fact]
+    public void ASpotOutsideTheAreaIsBroughtInside()
+    {
+        float h = WorldBounds.HalfSize, reach = TargetsModule.MaxReach;
+        foreach (var (fx, fz) in new[] { (0.95f, 0.95f), (-0.9f, 0f), (0f, 0.99f), (-0.85f, -0.97f) })
+        {
+            var spot = TargetsModule.PlaceOnDryGround(new Vector3(fx * h, 400f, fz * h));
+            Assert.InRange(spot.X, -reach, reach);
+            Assert.InRange(spot.Z, -reach, reach);
+            Assert.False(Terrain.IsWater(spot.X, spot.Z));
+            Assert.True(spot.Y - Terrain.HeightAt(spot.X, spot.Z) >= 150f);
+        }
     }
 
     [Fact]
     public void ASpotOnDryGroundStaysAndOneTooLowIsRaisedClearOfTheTerrain()
     {
-        var dry = TargetsModule.PlaceOnDryGround(new Vector3(150f, 340f, -700f));
-        Assert.Equal(new Vector3(150f, 340f, -700f), dry);
+        // A dry spot (no water within 60 m) on low ground: it stays as wanted.
+        (float X, float Z)? dry = null;
+        (float X, float Z) hill = (0f, 0f);
+        float hillHeight = float.MinValue;
+        foreach (var (x, z) in AreaSamples())
+        {
+            bool wetNear = false;
+            for (float dx = -60f; dx <= 60f && !wetNear; dx += 10f)
+                for (float dz = -60f; dz <= 60f && !wetNear; dz += 10f)
+                    wetNear = Terrain.IsWater(x + dx, z + dz);
+            if (wetNear)
+                continue;
+            float y = Terrain.HeightAt(x, z);
+            if (dry == null && y < 100f)
+                dry = (x, z);
+            if (y > hillHeight)
+            {
+                hillHeight = y;
+                hill = (x, z);
+            }
+        }
+        Assert.NotNull(dry);
+        var wanted = new Vector3(dry.Value.X, 400f, dry.Value.Z);
+        Assert.Equal(wanted, TargetsModule.PlaceOnDryGround(wanted));
 
-        // The top of the tallest mountain (250 m): a balloon wanted at 300 m goes up.
-        var peak = TargetsModule.PlaceOnDryGround(new Vector3(-1450f, 300f, -500f));
-        Assert.Equal(-1450f, peak.X);
-        Assert.Equal(-500f, peak.Z);
+        // The highest dry ground in the area (found by sampling): a balloon wanted below 150 m
+        // above it goes up, and stays over it.
+        Assert.True(hillHeight > 20f, $"the area's highest dry ground is only {hillHeight} m");
+        var peak = TargetsModule.PlaceOnDryGround(new Vector3(hill.X, hillHeight + 100f, hill.Z));
+        Assert.Equal(hill.X, peak.X);
+        Assert.Equal(hill.Z, peak.Z);
         Assert.True(peak.Y - Terrain.HeightAt(peak.X, peak.Z) >= 150f);
+        Assert.True(peak.Y > hillHeight + 100f);
     }
 
     [Fact]
