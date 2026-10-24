@@ -48,8 +48,8 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
   stick's lag adds just after the release are eased back (same time constant, capped at 0.6
   pitch stick, only while the wings are within 90 degrees of level). No yaw: the heading is
   kept (a bank still turns the plane while it rolls out). Any stick outside the dead zone
-  takes over at once; levelling resumes 0.25 s after letting go. The floor and border guards
-  still win; once clear, hands off keeps the climb or dive the guard left (after a floor
+  takes over at once; levelling resumes 0.25 s after letting go. The floor, ceiling and border
+  guards still win; once clear, hands off keeps the climb or dive the guard left (after a floor
   pull-up at least level, never a dive), so a plane let go in a dive dives until the floor
   guard pulls it up.
 - **Mouse aim** (`HasAim`): an autopilot steers smoothly toward `AimDirection`, like War
@@ -58,6 +58,16 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
 - **Floor**: below 20 m is never reached. When the plane is within 40 m of the floor plus
   2.5 s of its current descent, the autopilot takes over and climbs gently (about 20
   degrees) until clear. A hard clamp at 20 m is only a backstop.
+- **Ceiling**: no plane flies above 1000 m (`CeilingAltitude`); the floor in reverse. In the
+  50 m band below it (`CeilingBand`, from 950 m, `CeilingEaseStart`) the share of the speed
+  going up may be at most the share of the band left (1 at 950 m, 0 at 1000 m): whoever
+  commands the pitch (sticks, mouse aim, hands off, the guards, any plane), a climb above
+  that is eased off (time constant 0.25 s, `CeilingResponse`, through the usual stick
+  smoothing), so the plane levels out just below 1000 m with no bounce, and full up-stick
+  there flies level along it (banked, a level turn). Lowering the nose is never limited: the
+  pilot can dive away at once, and below 950 m nothing changes. A climb held hands off that
+  would go through the ceiling is levelled at it. A hard clamp at 1000 m (which also levels
+  the nose) is only a backstop, for a plane too slow in pitch (a dead tail) to level in the band.
 - **Border**: a 4 km x 4 km area centered on the origin (|x|, |z| <= 2000 m). Within 400 m
   of an edge and heading out, the autopilot turns back toward the origin, keeping a mild
   climb or dive. A hard clamp at the edge is only a backstop. The floor wins over the pilot,
@@ -89,7 +99,10 @@ than pitch and yaw, hands-off levelling (banks settle in 2 to 3 s without oversh
 wobble; climbs and dives, banked or not, keep their pitch angle within a degree and their
 heading; the short delay and dead zone, sticks override at once, inverted rights itself the
 shorter way, a steep dive is kept until the floor guard pulls up, never diving back),
-floor and border hold, determinism (with damage, downing and respawn), no allocations per
+floor and border hold, the ceiling (climbs of 20, 45 and 80 degrees eased off smoothly and
+levelled just below 1000 m, full up-stick flies level along it with no bounce or jitter and
+diving away is immediate, aim, inverted, dead tail, bots and random flying never above 1000 m,
+nothing changes below 950 m), determinism (with damage, downing and respawn), no allocations per
 tick; eight planes start by team and are published every tick in id order, four planes fly
 from their own inputs (others hands off), the `Teams` helper, `PlaneState.Alive` with the
 old constructor, engine, wing and tail damage, falling to the ground and staying there on

@@ -7,9 +7,10 @@ namespace Neo.Flight;
 /// <summary>
 /// Arcade flight of one plane: not a simulation. The plane always flies along its nose at
 /// a speed between <see cref="MinSpeed"/> and <see cref="MaxSpeed"/> (no stall, no spin),
-/// turns at fixed body rates, and is kept above <see cref="FloorAltitude"/> and inside the
-/// <see cref="AreaHalfSize"/> square by steering it gently away. Damage slows it, drags it
-/// into a roll and weakens its tail; a downed plane falls to the ground until it respawns.
+/// turns at fixed body rates, and is kept above <see cref="FloorAltitude"/>, below
+/// <see cref="CeilingAltitude"/> and inside the <see cref="AreaHalfSize"/> square by steering it
+/// gently away. Damage slows it, drags it into a roll and weakens its tail; a downed plane falls
+/// to the ground until it respawns.
 /// Deterministic; Step does not allocate.
 /// </summary>
 public sealed class FlightModel
@@ -39,6 +40,13 @@ public sealed class FlightModel
     /// <summary>Height above the floor kept free, plus the drop of the next seconds of descent.</summary>
     public const float FloorMargin = 40f;
     public const float FloorLookahead = 2.5f;
+    /// <summary>No plane flies above this (m).</summary>
+    public const float CeilingAltitude = 1000f;
+    /// <summary>Depth (m) of the band below the ceiling where the climb is eased off: from 950 m up.</summary>
+    public const float CeilingBand = 50f;
+    public const float CeilingEaseStart = CeilingAltitude - CeilingBand;
+    /// <summary>Time constant (s) with which the climb is brought down to the band's limit.</summary>
+    public const float CeilingResponse = 0.25f;
 
     public const float MaxAimBank = 75f * Deg;
 
@@ -204,6 +212,9 @@ public sealed class FlightModel
             yaw = input.Yaw;
         }
 
+        if (_position.Y > CeilingEaseStart)
+            CeilingLimit(climb, ref pitch);
+
         // A damaged wing drags the plane into a roll toward its side.
         roll += ((1f - _rightWing) - (1f - _leftWing)) * WingRollDrift;
 
@@ -233,7 +244,9 @@ public sealed class FlightModel
 
         _position += forward * (_speed * dt);
         // Backstop only: the guard steering normally keeps the plane well inside these.
-        _position.Y = MathF.Max(_position.Y, FloorAltitude);
+        _position.Y = Math.Clamp(_position.Y, FloorAltitude, CeilingAltitude);
+        if (_position.Y >= CeilingAltitude && forward.Y > 0f)
+            _orientation = Quaternion.Normalize(LevelNose(forward) * _orientation); // so it flies along the ceiling, not into it
         _position.X = Math.Clamp(_position.X, -AreaHalfSize, AreaHalfSize);
         _position.Z = Math.Clamp(_position.Z, -AreaHalfSize, AreaHalfSize);
     }
@@ -276,6 +289,21 @@ public sealed class FlightModel
         }
     }
 
+    /// <summary>World rotation that brings the nose to the horizon about the horizontal axis across it.</summary>
+    private Quaternion LevelNose(Vector3 forward)
+    {
+        Vector3 horizontal = new(forward.X, 0f, forward.Z);
+        if (horizontal.LengthSquared() < 1e-8f)
+        {
+            Vector3 up = Vector3.Transform(Vector3.UnitY, _orientation);
+            horizontal = new Vector3(-up.X, 0f, -up.Z); // straight up: pushed over, so it ends upright
+        }
+        horizontal = Vector3.Normalize(horizontal);
+        Vector3 axis = Vector3.Cross(forward, horizontal);
+        float angle = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
+        return axis.LengthSquared() > 1e-8f ? Quaternion.CreateFromAxisAngle(Vector3.Normalize(axis), angle) : Quaternion.Identity;
+    }
+
     /// <summary>A direction to steer to instead of the pilot when near the floor or the border.</summary>
     private bool GuardDirection(Vector3 forward, out Vector3 direction, out bool low)
     {
@@ -311,6 +339,35 @@ public sealed class FlightModel
         float rise = low ? 0.35f : Math.Clamp(forward.Y, -0.3f, 0.3f);
         direction = Vector3.Normalize(horizontal + new Vector3(0f, rise, 0f));
         return true;
+    }
+
+    /// <summary>Largest climb angle (rad) allowed at the current altitude: 90 degrees at the bottom
+    /// of the ceiling band, then its sine (the share of the speed going up) shrinks in proportion
+    /// to the height left, 0 at the ceiling: the last meters are approached ever more slowly.</summary>
+    private float MaxClimb => MathF.Asin(Math.Clamp((CeilingAltitude - _position.Y) / CeilingBand, 0f, 1f));
+
+    /// <summary>
+    /// Ceiling, the floor in reverse: in the band below it, the pitch command (whoever gives it) may
+    /// raise the climb only toward <see cref="MaxClimb"/>, so the plane levels out smoothly at the
+    /// ceiling and flies level along it at full up-stick. Lowering the nose is never limited.
+    /// </summary>
+    private void CeilingLimit(float climb, ref float pitch)
+    {
+        float maxClimb = MaxClimb;
+        float wantedRate = (maxClimb - climb) / CeilingResponse;
+        // Climb rate per unit of pitch stick: the nose moves toward the plane's up, so inverted a pull
+        // lowers it (up.Y / cos(climb) is about cos(bank); straight up, a push brings the nose over).
+        float tail = DeadTailResponse + (1f - DeadTailResponse) * _tail;
+        float upY = Vector3.Transform(Vector3.UnitY, _orientation).Y;
+        float cosClimb = MathF.Cos(climb);
+        float gain = PitchRate * tail * (cosClimb > 1e-3f ? Math.Clamp(upY / cosClimb, -1f, 1f) : 1f);
+        if (gain > 1e-3f)
+            pitch = MathF.Min(pitch, wantedRate / gain);
+        else if (gain < -1e-3f)
+            pitch = MathF.Max(pitch, wantedRate / gain);
+        pitch = Math.Clamp(pitch, -1f, 1f);
+        // Hands off keeps no climb that would take it through the ceiling.
+        _holdClimb = MathF.Min(_holdClimb, maxClimb);
     }
 
     /// <summary>
