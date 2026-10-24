@@ -38,6 +38,13 @@ public sealed class BotPilot
     private const float Deg = MathF.PI / 180f;
 
     // Tunables (see README).
+    /// <summary>
+    /// How good the bots are at evading, 1 = full (as before). Applied to the evasion only: its
+    /// reaction (before it starts), the cooldown and the time between jinks are 2 - skill times
+    /// longer; the evasion time, its stick inputs (bank, pull, roll, push) and the jinks are skill
+    /// times as big. Aiming, firing and the choice of moves are not affected.
+    /// </summary>
+    public const float EvasionSkill = 0.75f;
     /// <summary>Bullet speed used for the lead point, m/s (plus the bot's own speed).</summary>
     public const float BulletSpeed = 450f;
     /// <summary>Fires only when the target is closer than this, m.</summary>
@@ -130,6 +137,9 @@ public sealed class BotPilot
     private readonly float _attackThrottle;
     private readonly float _evadeLimit;
     private readonly float _breakShare;
+    private readonly float _evasionSkill;
+    private readonly float _evadeReaction;
+    private readonly float _evadeCooldown;
 
     private Vector3 _seenAim;
     private bool _hasSeenAim;
@@ -154,7 +164,8 @@ public sealed class BotPilot
     private int _jinkCount;
     private float _jinkPitch, _jinkRoll;
 
-    public BotPilot(int planeId)
+    /// <param name="evasionSkill">How good it is at evading (see <see cref="EvasionSkill"/>).</param>
+    public BotPilot(int planeId, float evasionSkill = EvasionSkill)
     {
         _id = planeId;
         _allies = Teams.IsAllies(planeId);
@@ -165,7 +176,11 @@ public sealed class BotPilot
         _attackThrottle = AttackThrottle - AttackThrottleSpread * (Spread(planeId, 6) + 1f) * 0.5f;
         // Each bot starts its burst cycle at a different point.
         _burstClock = (Spread(planeId, 5) + 1f) * 0.5f * (BurstLength + BurstPause);
-        _evadeLimit = EvadeTime + EvadeTimeSpread * Spread(planeId, 7);
+        _evasionSkill = evasionSkill;
+        float slower = 2f - evasionSkill; // 1.25 at 0.75: reaction, cooldown and jink period 25% longer
+        _evadeReaction = _reaction * slower;
+        _evadeCooldown = EvadeCooldown * slower;
+        _evadeLimit = (EvadeTime + EvadeTimeSpread * Spread(planeId, 7)) * evasionSkill;
         _breakShare = BreakShare + BreakShareSpread * Spread(planeId, 8);
     }
 
@@ -173,6 +188,15 @@ public sealed class BotPilot
 
     /// <summary>This bot's reaction delay, s.</summary>
     public float Reaction => _reaction;
+
+    /// <summary>How long a chaser must sit on its tail before it evades, s (its reaction, slower when <see cref="EvasionSkill"/> is below 1).</summary>
+    public float EvadeReaction => _evadeReaction;
+
+    /// <summary>This bot's longest evasion, s.</summary>
+    public float EvadeLimit => _evadeLimit;
+
+    /// <summary>Attacking time after an evasion before the next one, s.</summary>
+    public float Cooldown => _evadeCooldown;
 
     /// <summary>This bot's aim error, radians.</summary>
     public float AimErrorAngle => _aimError;
@@ -188,6 +212,10 @@ public sealed class BotPilot
 
     /// <summary>True when it jinked on the last <see cref="Fly"/> (evading while shot at).</summary>
     public bool Jinking { get; private set; }
+
+    /// <summary>The current jink offsets added to the pitch and roll stick while <see cref="Jinking"/>.</summary>
+    public float JinkPitchOffset => _jinkPitch;
+    public float JinkRollOffset => _jinkRoll;
 
     /// <summary>Evasions started so far (each picks its move afresh).</summary>
     public int Encounters => _encounter;
@@ -240,7 +268,7 @@ public sealed class BotPilot
             _reverseTime -= dt;
         if (_evade != BotMode.None)
             UpdateEvasion(states, known, in me, forward, dt);
-        else if (chaser >= 0 && _chaseTime >= _reaction && _cooldown <= 0f)
+        else if (chaser >= 0 && _chaseTime >= _evadeReaction && _cooldown <= 0f)
             StartEvasion(chaser, in states[chaser], in me);
 
         // Turning on an overshooter: it stays the target for a while.
@@ -278,9 +306,9 @@ public sealed class BotPilot
                 _jinkClock -= dt;
                 if (_jinkClock <= 0f)
                 {
-                    _jinkClock = JinkPeriod * (0.7f + 0.3f * (Spread(_id, 40 + _jinkCount) + 1f));
-                    _jinkPitch = JinkPitch * Spread(_id, 1000 + _jinkCount);
-                    _jinkRoll = JinkRoll * Spread(_id, 2000 + _jinkCount);
+                    _jinkClock = JinkPeriod * (2f - _evasionSkill) * (0.7f + 0.3f * (Spread(_id, 40 + _jinkCount) + 1f));
+                    _jinkPitch = JinkPitch * _evasionSkill * Spread(_id, 1000 + _jinkCount);
+                    _jinkRoll = JinkRoll * _evasionSkill * Spread(_id, 2000 + _jinkCount);
                     _jinkCount++;
                 }
                 pitch += _jinkPitch;
@@ -421,7 +449,7 @@ public sealed class BotPilot
     private void EndEvasion(int overshooter)
     {
         _evade = BotMode.None;
-        _cooldown = EvadeCooldown;
+        _cooldown = _evadeCooldown;
         _chaseTime = 0f;
         if (overshooter >= 0)
         {
@@ -452,7 +480,11 @@ public sealed class BotPilot
                 if (_evadePhase == 0 && (me.Speed >= ExtendSpeed && me.Position.Y < HighAltitude || lowDive || _phaseTime >= ExtendDiveTime))
                     NextPhase();
                 if (_evadePhase == 0)
+                {
                     Level(-ExtendDiveAngle, elev, bank, out pitch, out roll); // nose down, wings level
+                    if (MathF.Abs(bank) < 90f * Deg)
+                        pitch = MathF.Max(pitch, -_evasionSkill); // a softer push (rolling out of a steep bank: as before)
+                }
                 else if (_extendTurn)
                     Turn(60f * Deg, BreakElevation, 0.6f, in me, elev, bank, out pitch, out roll);
                 else
@@ -468,13 +500,13 @@ public sealed class BotPilot
                     NextPhase();
                 if (_evadePhase == 0)
                 {
-                    roll = Math.Clamp(WrapAngle(_side * MathF.PI - bank) * 3f, -1f, 1f);
-                    roll = roll == 0f ? _side : roll;
+                    roll = Math.Clamp(WrapAngle(_side * MathF.PI - bank) * 3f, -_evasionSkill, _evasionSkill);
+                    roll = roll == 0f ? _side * _evasionSkill : roll;
                     pitch = 0f;
                 }
                 else if (_evadePhase < 3)
                 {
-                    pitch = 1f;
+                    pitch = _evasionSkill;
                     roll = 0f;
                 }
                 else
@@ -507,9 +539,13 @@ public sealed class BotPilot
         if (me.Position.Y < MinAltitude + DiveFloorMargin)
             elevation = MathF.Max(elevation, 0f);
         float extra = Math.Clamp((elev - elevation) * 8f, -25f * Deg, 70f * Deg);
-        float error = WrapAngle(_side * (baseBank + extra) - bank);
-        roll = Math.Clamp(error * 3f, -1f, 1f);
-        pitch = pull * Math.Clamp(1.5f - MathF.Abs(error) / (60f * Deg), 0.3f, 1f); // full within 30 degrees of the bank
+        // Softer bank (evasion skill), the full one back once the nose is 1 degree above the elevation: never a climbing turn.
+        float softer = baseBank * (1f - _evasionSkill) * Math.Clamp(1f - (elev - elevation) / (1f * Deg), 0f, 1f);
+        float error = WrapAngle(_side * (baseBank - softer + extra) - bank);
+        // Softer roll (evasion skill), back to full as the nose rises above the elevation.
+        float rollLimit = Math.Clamp(_evasionSkill + (elev - elevation) / (10f * Deg), _evasionSkill, 1f);
+        roll = Math.Clamp(error * 3f, -rollLimit, rollLimit);
+        pitch = pull * _evasionSkill * Math.Clamp(1.5f - MathF.Abs(error) / (60f * Deg), 0.3f, 1f); // full within 30 degrees of the bank
     }
 
     /// <summary>Wings level, nose toward <paramref name="elevation"/>.</summary>

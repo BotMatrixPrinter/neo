@@ -28,13 +28,14 @@ In priority order, each step:
    out, turn back toward the center (easing toward 400 m). Flight's own guard starts at
    400 m, so a bot normally turns first.
 3. **Evade**: an enemy within 350 m, in the 60 degree rear cone and pointing its nose at
-   the bot (within 45 degrees), for longer than the bot's reaction time starts an evasion
-   (full throttle, no fire). Each evasion picks one move, from a fixed hash of the bot and
+   the bot (within 45 degrees), for longer than the bot's evasion reaction (its reaction time
+   × 1.25 with `EvasionSkill` 0.75) starts an evasion (full throttle, no fire). Its evasive
+   stick inputs are softened by `EvasionSkill` (see the table). Each evasion picks one move, from a fixed hash of the bot and
    how many evasions it has had (so it varies per bot and per encounter):
-   - **Break** (`BotMode.Break`): hard bank (80 degrees) toward the attacker's side (to spoil
+   - **Break** (`BotMode.Break`): hard bank (80 degrees × `EvasionSkill`: 60) toward the attacker's side (to spoil
      its aim; dead astern, the bot's habit, alternating), full pull once banked. The bank
-     grows when the nose rises, so the turn is held level or slightly down (-3 degrees),
-     never a climbing spiral.
+     grows when the nose rises (back to the full 80 once it is 1 degree above), so the turn is
+     held level or slightly down (-3 degrees), never a climbing spiral.
    - **Extend** (`Extend`): nose down 30 degrees, wings level, until 56 m/s (and below
      800 m), 3 s, or 180 m; then a level run, or a 60 degree turn toward the attacker's side.
    - **Split-S** (`SplitS`, above 500 m): roll inverted, pull through, level out the other
@@ -46,14 +47,14 @@ In priority order, each step:
    10 degrees down (level below 180 m) when below 280 m; otherwise a break about half the time (0.5 ± 0.15 per
    bot), else an extension, sometimes a split-S or roll-away when high enough. Dives level
    off 100 m above the 80 m safety height. While shot at (attacker within 350 m, nose within
-   10 degrees of the bot; not during a split-S) it **jinks**: random pitch (±0.35) and roll
-   (±0.5) offsets, new every 0.3..0.6 s (`Jinking`).
+   10 degrees of the bot; not during a split-S) it **jinks**: random pitch (±0.35 × 0.75) and
+   roll (±0.5 × 0.75) offsets, new every (0.3..0.6 s) × 1.25 (`Jinking`).
 
-   An evasion ends after its time (4 ± 1 s per bot), once the pursuer is shaken off (beyond
+   An evasion ends after its time ((4 ± 1 s) × 0.75 per bot), once the pursuer is shaken off (beyond
    450 m, or not pointing at the bot, for 1 s), or when it **overshoots** (ahead of the bot's
    wing line within 500 m, for the reaction time). After an overshoot the bot turns on it:
    it attacks the overshooter for 3 s even if another enemy is nearer. After any evasion it
-   attacks for at least 2 s before it evades again. `ChaserId` is the pursuer while evading.
+   attacks for at least 2 s × 1.25 before it evades again. `ChaserId` is the pursuer while evading.
 4. **Attack**: the nearest alive plane of the other team. The aim point is the lead point
    (where the target will be when bullets arrive, at 450 m/s plus the bot's own speed),
    plus a slowly wandering aim error, seen with a lag (the reaction time). Far off the
@@ -76,14 +77,15 @@ level turn, not by a loop.
 
 | Constant | Value | What |
 |---|---|---|
-| `ReactionTime` ± `ReactionSpread` | 0.3 ± 0.1 s | reaction delay per bot: lag of its view of the aim point, and how long a chaser must sit there before it breaks |
+| `EvasionSkill` | 0.75 | how good the bots are at evading (1.0 = as before; 0.75 since 2026-10-24: easier to shoot down). Evasion only: its reaction (before it starts) and `EvadeCooldown` × (2 − skill); `EvadeTime`, the evasive stick (break bank, pull and roll, extension push (wings within 90 degrees of level), split-S roll and pull, roll-away), `JinkPitch` and `JinkRoll` × skill; `JinkPeriod` × (2 − skill). The anti-climb part of a turn stays full. Aim, fire, `ReactionTime` for aiming, `BreakShare` and move choice unchanged. `new BotsModule(skill)` / `new BotPilot(id, skill)` for another value |
+| `ReactionTime` ± `ReactionSpread` | 0.3 ± 0.1 s | reaction delay per bot: lag of its view of the aim point, and (× (2 − `EvasionSkill`)) how long a chaser must sit there before it breaks (`EvadeReaction`) |
 | `AimError` ± `AimErrorSpread` | 1.5 ± 0.5 deg | wandering aim error per bot |
 | `AttackThrottle` − up to `AttackThrottleSpread` | 1 − 0..0.2 | attack throttle per bot, so a team spreads out |
 | `BulletSpeed` | 450 m/s | for the lead point (plus own speed) |
 | `FireRange`, `FireCone` | 350 m, 6 deg | when to fire |
 | `BurstLength`, `BurstPause` | 0.6 s, 0.5 s | bursts (each bot starts at a different point of the cycle) |
 | `ChaseRange`, `ChaseRearCos`, `ChaserNoseCos` | 350 m, 60 deg, 45 deg | what counts as being chased |
-| `EvadeTime` ± `EvadeTimeSpread`, `EvadeCooldown` | 4 ± 1 s, 2 s | longest evasion per bot; attacking time before the next |
+| `EvadeTime` ± `EvadeTimeSpread`, `EvadeCooldown` | 4 ± 1 s, 2 s | longest evasion per bot (× `EvasionSkill`: `EvadeLimit`); attacking time before the next (× (2 − `EvasionSkill`): `Cooldown`) |
 | `ShakeRange`, `ShakenTime` | 450 m, 1 s | pursuer shaken off |
 | `OvershootRange`, `ReverseTime` | 500 m, 3 s | overshoot; how long it then attacks the overshooter |
 | `BreakShare` ± `BreakShareSpread` | 0.5 ± 0.15 | share of breaks at mid altitude and good speed, per bot |
@@ -99,7 +101,7 @@ level turn, not by a loop.
 | `FineAngle` | 12 deg | below it, fine aim instead of bank and pull |
 | `CloseRange`, `CloseThrottle` | 150 m, 0.6 | ease off close behind a target |
 
-Harder bots later: less `AimError` and `ReactionTime`.
+Harder bots later: less `AimError` and `ReactionTime`, more `EvasionSkill`.
 
 ## Tests
 
@@ -115,10 +117,13 @@ attacker's side; varies its moves per bot and encounter; dives when slow or high
 and slow, breaks without climbing); with a pursuer glued to its tail (from mid altitude,
 high, near the ceiling, low, slow) never climbs more than 4 s on end nor while below 40 m/s,
 stays above 80 m and inside the area; evasions end within their time limit, then it attacks
-(also once shaken off); turns on a pursuer that overshoots; jinks while shot at; the chased
+(also once shaken off); turns on a pursuer that overshoots; jinks while shot at; with `EvasionSkill` 0.75 against 1.0 it
+evades later, pulls and banks less, jinks less and smaller and evades for less time, picks the
+same moves and attacks with the very same stick; the chased
 flight is deterministic; climbs away from
 the ground; turns back before the edge; circles near the center without a target; a full
 90 s 4 v 4 stays above 40 m and inside the area and shoots; determinism; bots differ and
-leave formation; no allocations per tick.
+leave formation; the host can create the module (parameterless constructor); no allocations
+per tick.
 
 Test it alone: `./test.sh Bots`.
