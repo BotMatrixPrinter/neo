@@ -32,10 +32,23 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
   cruise. Allies 1500 m south of the center (Z = +1500) heading north (-Z), Central 1500 m
   north (Z = -1500) heading south (+Z); each team side by side 60 m apart along X, centered
   on X = 0 (X = -90, -30, 30, 90 for the 1st..4th of the team).
-- **Speed**: throttle sets the level speed: 0 → 25 m/s (minimum), 0.5 → 42 m/s (cruise,
-  about 150 km/h), 1 → 60 m/s (maximum), approached at 0.5/s. Diving gains speed and
-  climbing loses it (6 m/s² per g of nose-down), always clamped to 25..60. The plane flies
-  where its nose points: no stall, no spin, no slip.
+- **Speed**: throttle sets the level speed: 0 → 25 m/s (`MinSpeed`), 0.5 → 42 m/s (cruise,
+  about 150 km/h), 1 → 60 m/s (`MaxSpeed`, the level maximum). Each step the speed changes by
+  the throttle's pull and drag (toward the throttle's speed at 0.5/s, `SpeedResponse`, adding
+  at most 3 m/s², `MaxThrustAcceleration`) plus gravity along the flight path,
+  -9.81 x 0.8 (`Gravity` x `GravityScale`, the arcade share) x sin(climb angle). So a climb
+  steeper than about 22 degrees bleeds speed even at full throttle, a gentle one keeps most of
+  it (about 57 m/s at 10 degrees). Above the level maximum only a weak drag (0.15/s,
+  `OverspeedDrag`) acts, so a full-throttle dive builds speed up to 85 m/s (`DiveMaxSpeed`, the
+  cap); back in level flight the speed settles at the throttle's again. Always 25..85 m/s.
+  The plane flies where its nose points: no stall, no spin, no slip.
+- **Too slow to climb**: below 35 m/s (`MinSpeed` + `LowSpeedBand`) the climb is limited
+  like at the ceiling: the sine of the largest climb allowed is the share of that 10 m/s band
+  left (level at 25 m/s, free at 35 m/s); a steeper climb, whoever commands it (sticks, mouse
+  aim, hands off, border guard), is eased down (time constant 0.5 s, `LowSpeedResponse`): the
+  nose drops gently until the plane has speed again, so a full-throttle climb settles at a
+  gentle climb near the minimum speed. Lowering the nose is never limited; the floor guard's
+  pull-up is never limited either.
 - **Sticks** (no `HasAim`): `Pitch`, `Roll`, `Yaw` (-1..1) are body rates of 70, 180 and
   40 deg/s; commands are smoothed (15/s) so rates are snappy but never jump. A banked plane
   also turns about world up (30 deg/s at 90 degrees of bank).
@@ -77,8 +90,10 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
 
 Each plane keeps the latest part health from `PlaneDamageState` (0..1, 1 undamaged):
 
-- **Engine**: max speed is `MaxSpeed` times 0.6 + 0.4 x health (60 m/s healthy, 36 m/s
-  dead); neither throttle nor diving goes faster.
+- **Engine**: the level max speed (`MaxSpeedNow`) is `MaxSpeed` times 0.6 + 0.4 x health
+  (60 m/s healthy, 36 m/s dead), and the throttle's most added acceleration is scaled the same.
+  A plane faster than that slows down to it (by the overspeed drag, gradually); it climbs with
+  less speed and dives slower (the overspeed drag acts above its lower max), still capped at 85 m/s.
 - **Wings**: a damaged wing adds roll stick toward its side, 0.4 x (right damage - left
   damage). Hands off, the levelling settles at a bank toward the damaged wing (about 13
   degrees at 0.7 health, about 40 at 0); with sticks the pilot has to hold against it.
@@ -93,8 +108,12 @@ Each plane keeps the latest part health from `PlaneDamageState` (0..1, 1 undamag
 ## Tests
 
 `Tests/FlightModuleTests.cs`, with a fake bus (`TestBus`) that publishes fake
-`ControlInput`s: start state, speeds stay in 25..60 (cruise, max, min, dives, climbs,
-random flying), aim steering converges smoothly and banks into turns, rolls are quicker
+`ControlInput`s: start state, speeds stay in 25..85 (cruise, max, min, dives, climbs,
+random flying), gravity (a 60 degree full-throttle climb only bleeds speed, down to near the
+minimum, then the climb is eased to a gentle one; a gentle climb keeps most of it; a slow plane,
+by stick or aim, cannot hold a steep climb, the nose drops gently and climbs again with
+throttle; a dive builds speed past 60 up to the 85 cap, level flight settles back at the
+throttle's speed, at full and cruise throttle), aim steering converges smoothly and banks into turns, rolls are quicker
 than pitch and yaw, hands-off levelling (banks settle in 2 to 3 s without overshoot or
 wobble; climbs and dives, banked or not, keep their pitch angle within a degree and their
 heading; the short delay and dead zone, sticks override at once, inverted rights itself the
@@ -105,7 +124,8 @@ diving away is immediate, aim, inverted, dead tail, bots and random flying never
 nothing changes below 950 m), determinism (with damage, downing and respawn), no allocations per
 tick; eight planes start by team and are published every tick in id order, four planes fly
 from their own inputs (others hands off), the `Teams` helper, `PlaneState.Alive` with the
-old constructor, engine, wing and tail damage, falling to the ground and staying there on
+old constructor, engine damage (lower level speed, slows down gradually to it, climbs and
+dives slower), wing and tail damage, falling to the ground and staying there on
 `PlaneDestroyed`, respawn at the team's start point at full speed.
 
 Test it alone: `./test.sh Flight`. No Godot view: the Plane module draws the plane.
