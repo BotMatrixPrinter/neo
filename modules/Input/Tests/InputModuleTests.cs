@@ -295,6 +295,39 @@ public class InputModuleTests
     }
 
     [Fact]
+    public void HoldingRPublishesRepairOnEveryTickAndThrottleStillWorks()
+    {
+        var bus = new FakeBus();
+        var input = new InputModule();
+        input.Start(bus);
+        input.SetKeys(new KeyState { R = true, Shift = true });
+        Run(input, 30); // 0.5 s
+        for (int i = 0; i < 30; i++)
+            Assert.True(Only(bus, i).Repair);
+        Assert.Equal(0.95f, input.Throttle, 4);
+        input.SetKeys(default);
+        input.Tick(new TickContext(31, Step));
+        Assert.False(Only(bus, 30).Repair);
+    }
+
+    [Fact]
+    public void HoldingPadYPublishesRepairOnEveryTick()
+    {
+        var bus = new FakeBus();
+        var input = new InputModule();
+        input.Start(bus);
+        input.SetState(GamepadFlight.Map(new PadState { Y = true, B = true }));
+        Run(input, 20);
+        for (int i = 0; i < 20; i++)
+            Assert.True(Only(bus, i).Repair);
+        Assert.Equal(InputModule.StartThrottle - 20 * InputModule.ThrottleRate / 60f, input.Throttle, 4);
+        input.SetState(GamepadFlight.Map(new PadState { A = true }));
+        input.Tick(new TickContext(21, Step));
+        Assert.False(Only(bus, 20).Repair);
+        Assert.True(Only(bus, 20).Fire);
+    }
+
+    [Fact]
     public void PadSticksFlyThePlane()
     {
         var bus = new FakeBus();
@@ -338,6 +371,7 @@ public class InputModuleTests
         Assert.Equal(0f, msg.Roll);
         Assert.Equal(0f, msg.Yaw);
         Assert.False(msg.Fire);
+        Assert.False(msg.Repair);
         Assert.False(msg.HasAim);
     }
 
@@ -361,9 +395,9 @@ public class InputModuleTests
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 10_000; i++)
         {
-            input.SetState(new DeviceState(0.1f, 0.2f, 0.3f, i & 1, 0, true));
+            input.SetState(new DeviceState(0.1f, 0.2f, 0.3f, i & 1, 0, true, (i & 1) == 0));
             input.Tick(in tick);
-            input.SetKeys(new KeyState { W = (i & 1) == 0, D = true, Shift = true, LeftMouse = true });
+            input.SetKeys(new KeyState { W = (i & 1) == 0, D = true, Shift = true, LeftMouse = true, R = (i & 1) == 1 });
             input.Tick(in tick);
         }
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());

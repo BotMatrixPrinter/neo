@@ -66,6 +66,7 @@ public partial class InputView : Control, IModuleView
         Shift = Held(Key.Shift),
         Ctrl = Held(Key.Ctrl),
         Space = Held(Key.Space),
+        R = Held(Key.R),
         LeftMouse = Godot.Input.IsMouseButtonPressed(MouseButton.Left),
     };
 
@@ -83,10 +84,11 @@ public partial class InputView : Control, IModuleView
                 RightY = Godot.Input.GetJoyAxis(pad, JoyAxis.RightY),
                 LeftTrigger = Godot.Input.GetJoyAxis(pad, JoyAxis.TriggerLeft),
                 RightTrigger = Godot.Input.GetJoyAxis(pad, JoyAxis.TriggerRight),
-                // Godot names buttons by Xbox position: A = Cross, X = Square, B = Circle.
+                // Godot names buttons by Xbox position: A = Cross, X = Square, B = Circle, Y = Triangle.
                 A = Godot.Input.IsJoyButtonPressed(pad, JoyButton.A),
                 X = Godot.Input.IsJoyButtonPressed(pad, JoyButton.X),
                 B = Godot.Input.IsJoyButtonPressed(pad, JoyButton.B),
+                Y = Godot.Input.IsJoyButtonPressed(pad, JoyButton.Y),
             };
             if (GamepadFlight.HasInput(state))
                 return GamepadFlight.Map(state);

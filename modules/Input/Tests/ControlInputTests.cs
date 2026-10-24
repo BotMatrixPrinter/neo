@@ -81,6 +81,23 @@ public class ControlInputTests
         var input = default(ControlInput);
         Assert.False(input.HasAim);
         Assert.False(input.Fire);
+        Assert.False(input.Repair);
         Assert.Equal(0f, input.Throttle);
+    }
+
+    [Fact]
+    public void RepairIsFalseFromTheOldConstructorAndSetByTheNewOne()
+    {
+        Assert.False(new ControlInput(0, 0.5f, 0, 0, 0.7f, true, false, Vector3.Zero).Repair);
+        var held = new ControlInput(3, 0.5f, -2f, 0, 0.7f, false, true, new Vector3(0, 0, -2), repair: true);
+        Assert.True(held.Repair);
+        Assert.Equal(3, held.PlaneId);
+        Assert.Equal(0.5f, held.Pitch);
+        Assert.Equal(-1f, held.Roll);
+        Assert.Equal(0.7f, held.Throttle);
+        Assert.False(held.Fire);
+        Assert.True(held.HasAim);
+        Assert.Equal(new Vector3(0, 0, -1), held.AimDirection);
+        Assert.False(new ControlInput(0, 0, 0, 0, 0, false, false, Vector3.Zero, repair: false).Repair);
     }
 }

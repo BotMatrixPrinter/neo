@@ -4,7 +4,7 @@ namespace Neo.Input;
 
 /// <summary>
 /// Flies the plane directly from keys: maps a <see cref="KeyState"/> to pitch, roll, yaw,
-/// throttle and fire, and smooths the axes so a tap makes a small correction. An axis
+/// throttle, fire and repair, and smooths the axes so a tap makes a small correction. An axis
 /// moves toward full deflection over <see cref="RampSeconds"/> and back to center over
 /// <see cref="ReturnSeconds"/>. Never aims (<see cref="DeviceState"/> has no aim).
 /// </summary>
@@ -28,7 +28,7 @@ public sealed class KeyboardFlight
     /// <summary>
     /// The unsmoothed controls for <paramref name="keys"/>: W/S pitch -1/+1 (nose down/up,
     /// swapped when <paramref name="invertPitch"/>), A/D roll left/right, Q/E yaw left/right,
-    /// Shift/Ctrl throttle up/down, Space or the left mouse button fire.
+    /// Shift/Ctrl throttle up/down, Space or the left mouse button fire, R repair.
     /// </summary>
     public static DeviceState Map(in KeyState keys, bool invertPitch)
     {
@@ -41,7 +41,8 @@ public sealed class KeyboardFlight
             Axis(keys.E, keys.Q),
             keys.Shift ? 1f : 0f,
             keys.Ctrl ? 1f : 0f,
-            keys.Space || keys.LeftMouse);
+            keys.Space || keys.LeftMouse,
+            keys.R);
     }
 
     /// <summary>Advances the smoothing by <paramref name="step"/> seconds and returns the smoothed controls.</summary>
@@ -51,7 +52,7 @@ public sealed class KeyboardFlight
         Pitch = Approach(Pitch, target.Pitch, step);
         Roll = Approach(Roll, target.Roll, step);
         Yaw = Approach(Yaw, target.Yaw, step);
-        return new DeviceState(Pitch, Roll, Yaw, target.ThrottleUp, target.ThrottleDown, target.Fire);
+        return new DeviceState(Pitch, Roll, Yaw, target.ThrottleUp, target.ThrottleDown, target.Fire, target.Repair);
     }
 
     /// <summary>Back to center at once (e.g. when another device takes over).</summary>

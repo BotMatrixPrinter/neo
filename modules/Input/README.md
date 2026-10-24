@@ -14,6 +14,7 @@ Reads the pilot's mouse, keyboard or gamepad and publishes what they want the pl
 | Shift / Ctrl | Throttle up / down (about 0.5 per second, held) |
 | Left mouse button | Fire |
 | Space | Also fires |
+| R | Repair (held; `ControlInput.Repair` true on every tick it is down) |
 
 The keys fly the plane directly (`HasAim` is always false; the Flight module flies by
 Pitch/Roll/Yaw). Each axis is smoothed a little: about 0.15 s from center to full
@@ -38,6 +39,7 @@ trigger or button switches to it, and the first of up to 4 pads with input is re
 | B (Xbox) / Circle (PlayStation) | Throttle down (held, same rate as Ctrl) |
 | Right trigger past half way | Fire |
 | A (Xbox) / Cross (PlayStation) | Also fires |
+| Y (Xbox) / Triangle (PlayStation) | Repair (held; `ControlInput.Repair` true on every tick it is down) |
 | Left trigger | Nothing for now |
 
 Every stick and trigger axis has the same dead zone (`GamepadFlight.Deadzone`, 0.15):
@@ -49,13 +51,15 @@ the plane.
 
 - **Contract** (`Contract/`, namespace `Neo.Input`): `ControlInput`, published on the bus
   once per fixed step: `PlaneId` (0 for now: one plane), `Pitch`, `Roll`, `Yaw` (-1..1;
-  positive = nose up, roll right, yaw right), `Throttle` (0..1), `Fire`, `HasAim` and
+  positive = nose up, roll right, yaw right), `Throttle` (0..1), `Fire`, `Repair` (the Repair button is held this step; false from the
+  original 8-argument constructor, set by the added one with a trailing `repair`), `HasAim` and
   `AimDirection` (world-space unit vector to fly toward; `Vector3.Zero` when `HasAim` is
-  false). Its constructor clamps the axes, turns non-finite values into 0, normalizes the
+  false). Input only reports Repair: what it does (ignoring the pilot's maneuvers, repair
+  cycles) is up to the modules that read it. Its constructor clamps the axes, turns non-finite values into 0, normalizes the
   aim direction, and drops the aim (`HasAim` false) if the direction is zero or not finite.
 - **Core** (`Core/`): `InputModule` (`IModule`). Its view calls `SetKeys(KeyState)` (mouse
   and keyboard) or `SetState(DeviceState)` (gamepad, mapped from the raw `PadState` by `GamepadFlight`: sticks, dead zone,
-  buttons, fire) each frame; the last one called picks
+  buttons, fire, repair) each frame; the last one called picks
   the device. On each `Tick` it turns keys into controls with `KeyboardFlight` (key mapping
   and smoothing, `RampSeconds` 0.15, `ReturnSeconds` 0.05; reset when the pad takes over),
   moves `Throttle` (starts at 0.7) by `(ThrottleUp - ThrottleDown) * 0.5 * step`, clamped to
@@ -64,11 +68,11 @@ the plane.
 - **Godot** (`Godot/Main.tscn`, `InputView.cs`): a full-screen `Control` (draws nothing,
   ignores the mouse) that reads keys, the left mouse button and the pads (raw `PadState`)
   every frame and hands them to the Core; its exported `InvertPitch` sets the Core's.
-- **Tests** (`Tests/`): `ControlInputTests` (ranges, clamping, aim normalization, no-aim),
-  `KeyboardFlightTests` (each key's mapping, invert, throttle and fire keys, smoothing: ramp,
+- **Tests** (`Tests/`): `ControlInputTests` (ranges, clamping, aim normalization, no-aim, `Repair` default and set),
+  `KeyboardFlightTests` (each key's mapping, invert, throttle, fire and repair keys, smoothing: ramp,
   faster return, taps, reversing), `GamepadFlightTests` (each stick axis, buttons,
-  triggers, fire, the dead zone on every axis, what counts as touching the pad), `InputModuleTests` (one message per tick for plane 0,
-  throttle start/smoothing/clamping, pad X/B throttle and sticks, keys fly the plane, `HasAim` false on keyboard and pad,
+  triggers, fire, Y repair, the dead zone on every axis, what counts as touching the pad), `InputModuleTests` (one message per tick for plane 0,
+  throttle start/smoothing/clamping, R and Y publish `Repair` every held tick with throttle still working, pad X/B throttle and sticks, keys fly the plane, `HasAim` false on keyboard and pad,
   invert setting, latest state wins, no allocations per tick), with a fake bus.
 
 Test it alone: `./test.sh Input`. The scene draws nothing, so it has no screenshot.

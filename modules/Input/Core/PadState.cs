@@ -33,4 +33,7 @@ public readonly struct PadState
 
     /// <summary>B (Xbox) / Circle (PlayStation): throttle down.</summary>
     public bool B { get; init; }
+
+    /// <summary>Y (Xbox) / Triangle (PlayStation): repair (held).</summary>
+    public bool Y { get; init; }
 }

@@ -59,6 +59,21 @@ public class GamepadFlightTests
     }
 
     [Fact]
+    public void YIsRepairAndNothingElse()
+    {
+        var state = GamepadFlight.Map(new PadState { Y = true });
+        Assert.Equal(new DeviceState(0, 0, 0, 0, 0, false, repair: true), state);
+        Assert.True(state.Repair);
+        Assert.False(GamepadFlight.Map(new PadState { A = true, X = true, B = true, RightTrigger = 1f }).Repair);
+        Assert.False(GamepadFlight.Map(default).Repair);
+        // Held with the sticks: the axes still come through (Flight decides to ignore them).
+        var flying = GamepadFlight.Map(new PadState { Y = true, LeftY = 0.8f, X = true });
+        Assert.True(flying.Repair);
+        Assert.Equal(0.8f, flying.Pitch);
+        Assert.Equal(1f, flying.ThrottleUp);
+    }
+
+    [Fact]
     public void TriggersDoNotChangeThrottle()
     {
         var state = GamepadFlight.Map(new PadState { LeftTrigger = 1f, RightTrigger = 1f });
@@ -104,5 +119,6 @@ public class GamepadFlightTests
         Assert.True(GamepadFlight.HasInput(new PadState { A = true }));
         Assert.True(GamepadFlight.HasInput(new PadState { X = true }));
         Assert.True(GamepadFlight.HasInput(new PadState { B = true }));
+        Assert.True(GamepadFlight.HasInput(new PadState { Y = true }));
     }
 }

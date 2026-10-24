@@ -9,7 +9,13 @@ namespace Neo.Input;
 public readonly struct ControlInput
 {
     public ControlInput(int planeId, float pitch, float roll, float yaw, float throttle, bool fire, bool hasAim, Vector3 aimDirection)
+        : this(planeId, pitch, roll, yaw, throttle, fire, hasAim, aimDirection, repair: false)
     {
+    }
+
+    public ControlInput(int planeId, float pitch, float roll, float yaw, float throttle, bool fire, bool hasAim, Vector3 aimDirection, bool repair)
+    {
+        Repair = repair;
         PlaneId = planeId;
         Pitch = Clamp(pitch, -1f, 1f);
         Roll = Clamp(roll, -1f, 1f);
@@ -46,6 +52,12 @@ public readonly struct ControlInput
 
     /// <summary>The guns are held down.</summary>
     public bool Fire { get; }
+
+    /// <summary>
+    /// The Repair button is held down this step (gamepad Y / Triangle, keyboard R); false
+    /// from the constructor without <c>repair</c>.
+    /// </summary>
+    public bool Repair { get; }
 
     /// <summary>True when <see cref="AimDirection"/> is valid (mouse aim); false with a gamepad.</summary>
     public bool HasAim { get; }

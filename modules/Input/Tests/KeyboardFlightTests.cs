@@ -22,6 +22,7 @@ public class KeyboardFlightTests
         Assert.Equal(0f, state.ThrottleUp);
         Assert.Equal(0f, state.ThrottleDown);
         Assert.False(state.Fire);
+        Assert.False(state.Repair);
     }
 
     [Fact]
@@ -50,6 +51,20 @@ public class KeyboardFlightTests
         Assert.True(KeyboardFlight.Map(Keys("LeftMouse"), false).Fire);
         Assert.True(KeyboardFlight.Map(Keys("Space"), false).Fire);
         Assert.False(KeyboardFlight.Map(default, false).Fire);
+    }
+
+    [Fact]
+    public void RIsRepair()
+    {
+        var state = KeyboardFlight.Map(Keys("R"), false);
+        Assert.Equal(new DeviceState(0, 0, 0, 0, 0, false, repair: true), state);
+        Assert.False(KeyboardFlight.Map(new KeyState { W = true, Space = true, Shift = true }, false).Repair);
+        Assert.False(KeyboardFlight.Map(default, false).Repair);
+        // Passed straight through the smoothing on every step it is held, dropped at once on release.
+        var flight = new KeyboardFlight();
+        Assert.True(flight.Update(new KeyState { R = true, D = true }, false, Step).Repair);
+        Assert.True(flight.Update(Keys("R"), false, Step).Repair);
+        Assert.False(flight.Update(default, false, Step).Repair);
     }
 
     [Fact]
@@ -153,6 +168,7 @@ public class KeyboardFlightTests
         "Shift" => new KeyState { Shift = true },
         "Ctrl" => new KeyState { Ctrl = true },
         "Space" => new KeyState { Space = true },
+        "R" => new KeyState { R = true },
         "LeftMouse" => new KeyState { LeftMouse = true },
         _ => default,
     };

@@ -80,7 +80,7 @@ public sealed class InputModule : IModule
         float throttle = Throttle + (up - down) * ThrottleRate * step;
         Throttle = throttle < 0 ? 0 : throttle > 1 ? 1 : throttle;
 
-        Last = new ControlInput(PlaneId, state.Pitch, state.Roll, state.Yaw, Throttle, state.Fire, false, Vector3.Zero);
+        Last = new ControlInput(PlaneId, state.Pitch, state.Roll, state.Yaw, Throttle, state.Fire, false, Vector3.Zero, state.Repair);
         _bus?.Publish(Last);
     }
 

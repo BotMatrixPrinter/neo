@@ -9,6 +9,11 @@ namespace Neo.Input;
 public readonly struct DeviceState
 {
     public DeviceState(float pitch, float roll, float yaw, float throttleUp, float throttleDown, bool fire)
+        : this(pitch, roll, yaw, throttleUp, throttleDown, fire, repair: false)
+    {
+    }
+
+    public DeviceState(float pitch, float roll, float yaw, float throttleUp, float throttleDown, bool fire, bool repair)
     {
         Pitch = pitch;
         Roll = roll;
@@ -16,6 +21,7 @@ public readonly struct DeviceState
         ThrottleUp = throttleUp;
         ThrottleDown = throttleDown;
         Fire = fire;
+        Repair = repair;
     }
 
     /// <summary>-1..1, positive = nose up.</summary>
@@ -34,4 +40,7 @@ public readonly struct DeviceState
     public float ThrottleDown { get; }
 
     public bool Fire { get; }
+
+    /// <summary>The Repair button is held (R key or Y/Triangle).</summary>
+    public bool Repair { get; }
 }

@@ -33,6 +33,9 @@ public readonly struct KeyState
     /// <summary>Fire.</summary>
     public bool Space { get; init; }
 
+    /// <summary>Repair (held).</summary>
+    public bool R { get; init; }
+
     /// <summary>Left mouse button: fire.</summary>
     public bool LeftMouse { get; init; }
 }
