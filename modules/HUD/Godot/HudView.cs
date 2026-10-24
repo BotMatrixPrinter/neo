@@ -108,6 +108,7 @@ public partial class HudView : CanvasLayer, IModuleView
     private string? _boostShown;
     private Label _boostPopup = null!;
     private Label _overheated = null!;
+    private Label _pullUp = null!;
     private Panel _heatFill = null!;
     private StyleBoxFlat _heatStyle = null!;
     private Vector2 _laidOutFor;
@@ -260,6 +261,12 @@ public partial class HudView : CanvasLayer, IModuleView
             _feedRows[i] = row;
         }
 
+        // Upper center: PULL UP! while low over the ground and descending, flashing faster when lower.
+        _pullUp = MakeLabel(HudModule.PullUpText, font, 120, ShotRed, Vector2.Zero, new Vector2(1000f, 170f), HorizontalAlignment.Center);
+        _pullUp.LabelSettings.OutlineSize = 26;
+        _pullUp.Visible = false;
+        _root.AddChild(_pullUp);
+
         // Center: SHOT DOWN! and the countdown, over a red tint.
         _downLayer = new Control { MouseFilter = Control.MouseFilterEnum.Ignore, Visible = false };
         _root.AddChild(_downLayer);
@@ -292,7 +299,15 @@ public partial class HudView : CanvasLayer, IModuleView
         float t = (float)_previewTime;
         float speed = 54f + 3f * Mathf.Sin(t * 1.3f);
         var position = new System.Numerics.Vector3(0f, 310f + 9f * t, -55f * t);
-        _previewBus.Publish(new PlaneState(0, position, System.Numerics.Quaternion.Identity, new System.Numerics.Vector3(0f, 0f, -speed), speed, 0.9f));
+        float climb = 9f;
+        if (PreviewDive(t))
+        {
+            // Every third cycle the player dives at the ground until it crashes at 1.3 s: "PULL UP!".
+            float c = t % 10f;
+            climb = -35f;
+            position.Y = Neo.World.Terrain.HeightAt(position.X, position.Z) + 52f + climb * c;
+        }
+        _previewBus.Publish(new PlaneState(0, position, System.Numerics.Quaternion.Identity, new System.Numerics.Vector3(0f, climb, -speed), speed, 0.9f));
         // Guns: heat up over 2.6 s, overheat for 2 s, cool, repeat every 6 s.
         float cycle = t % 6f;
         float heat = cycle < 2.6f ? cycle / 2.6f : cycle < 4.6f ? 1f : Mathf.Max(0f, 1f - (cycle - 4.6f) / 1.4f);
@@ -307,6 +322,8 @@ public partial class HudView : CanvasLayer, IModuleView
         PreviewPlanes(t, position);
         _hud.Tick(new TickContext((long)(_previewTime * 60 + 0.5), delta));
     }
+
+    private static bool PreviewDive(float t) => (int)(t / 10f) % 3 == 2 && t % 10f < 1.3f;
 
     // Preview: the player pops a balloon at 0.6 s every 20 s; its boost then runs 20 s (60 in the game,
     // shortened so the last 10 s pulse soon).
@@ -340,7 +357,8 @@ public partial class HudView : CanvasLayer, IModuleView
     // Preview, every 10 s: two kills in the feed, then the player shot down at 1.3 s (its parts
     // worn down to a destroyed tail) and back 5 s later at full health. At 6.6 s the engine and left
     // wing are hit (the repair hint), at 7.1 s Repair is held on the engine (4 s a cycle) and let go
-    // at 9.5 s (Repair cancelled).
+    // at 9.5 s (Repair cancelled). Every third cycle (20-30 s, ...) Red 6 crashes on its own instead
+    // of being shot down, and the player, diving, is forced into the ground by Red 5.
     private void PreviewCombat(float t)
     {
         int cycle = (int)(t / 10f);
@@ -369,12 +387,18 @@ public partial class HudView : CanvasLayer, IModuleView
         }
         if (_previewEvent == 3 && c >= 0.8f)
         {
-            _previewBus!.Publish(new PlaneDestroyed(6, 2));
+            bool dive = cycle % 3 == 2;
+            if (dive)
+                _previewBus!.Publish(new PlaneCrashed(6, System.Numerics.Vector3.Zero, 50f));
+            _previewBus!.Publish(new PlaneDestroyed(6, dive ? -1 : 2));
             _previewEvent++;
         }
         if (_previewEvent == 4 && c >= 1.3f)
         {
-            _previewBus!.Publish(new PlaneDestroyed(0, 4));
+            bool dive = cycle % 3 == 2;
+            if (dive)
+                _previewBus!.Publish(new PlaneCrashed(0, System.Numerics.Vector3.Zero, 60f));
+            _previewBus!.Publish(new PlaneDestroyed(0, dive ? 5 : 4));
             _previewEvent++;
         }
         if (_previewEvent == 5 && c >= 6.3f)
@@ -586,6 +610,10 @@ public partial class HudView : CanvasLayer, IModuleView
         }
 
         // Shot down: pops in big, then the countdown.
+        _pullUp.Visible = _hud.PullUpWarning;
+        if (_hud.PullUpWarning)
+            _pullUp.Modulate = _hud.PullUpFlashOn ? Colors.White : new Color(1f, 1f, 1f, 0.12f);
+
         if (_hud.PlayerDown)
         {
             if (!_downLayer.Visible)
@@ -639,6 +667,7 @@ public partial class HudView : CanvasLayer, IModuleView
         _hintPanel.Position = new Vector2(_damagePanel.Position.X, _damagePanel.Position.Y - 20f - HintHeight);
         _feed.Position = new Vector2(_root.Size.X - Margin - FeedWidth, Margin);
         _downLayer.Size = _root.Size;
+        _pullUp.Position = new Vector2((_root.Size.X - _pullUp.Size.X) * 0.5f, _root.Size.Y * 0.2f);
         _downBox.Position = new Vector2((_root.Size.X - _downBox.Size.X) * 0.5f, (_root.Size.Y - _downBox.Size.Y) * 0.5f - 60f);
     }
 

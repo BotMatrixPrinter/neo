@@ -5,6 +5,7 @@ using Neo.Flight;
 using Neo.Guns;
 using Neo.Shell;
 using Neo.Targets;
+using Neo.World;
 using Xunit;
 
 namespace Neo.HUD.Tests;
@@ -235,6 +236,191 @@ public class HudModuleTests
         Assert.Equal(victim, hud.KillFeedVictim(0));
         Assert.Equal(shooter, hud.KillFeedShooter(0));
         Assert.Equal(line, HudModule.KillLine(victim, shooter));
+    }
+
+    [Theory]
+    [InlineData(5, -1, "Red 5 crashed")]
+    [InlineData(0, -1, "You crashed")]
+    [InlineData(2, -1, "Blue 2 crashed")]
+    [InlineData(0, 5, "Red 5 forced you into the ground")]
+    [InlineData(5, 0, "You forced Red 5 into the ground")]
+    [InlineData(6, 2, "Blue 2 forced Red 6 into the ground")]
+    [InlineData(3, 1, "Blue 1 forced Blue 3 into the ground")]
+    public void Crash_lines(int victim, int shooter, string line) =>
+        Assert.Equal(line, HudModule.CrashLine(victim, shooter));
+
+    [Fact]
+    public void Destroyed_with_no_shooter_reads_crashed()
+    {
+        var (hud, bus) = Started();
+        bus.Send(new PlaneDestroyed(5, -1));
+        bus.Send(new PlaneDestroyed(0, -1));
+        Assert.Equal("Red 5 crashed", hud.KillFeedText(0));
+        Assert.Equal("You crashed", hud.KillFeedText(1));
+        Assert.True(hud.KillFeedIsCrash(0));
+        Assert.Equal(-1, hud.KillFeedShooter(1));
+        Assert.Equal("Red 5 crashed", HudModule.KillLine(5, -1));
+        Assert.Equal(1, hud.Deaths);
+        Assert.Equal(0, hud.Kills);
+    }
+
+    [Fact]
+    public void Crash_forced_by_an_attacker_reads_forced_into_the_ground_in_either_order()
+    {
+        // Flight's PlaneCrashed and Damage's PlaneDestroyed come in the same step, either first.
+        var (hud, bus) = Started();
+        bus.Send(new PlaneCrashed(0, Vector3.Zero, 40f));
+        bus.Send(new PlaneDestroyed(0, 5));
+        bus.Send(new PlaneDestroyed(5, 0));
+        bus.Send(new PlaneCrashed(5, Vector3.Zero, 40f));
+        Assert.Equal(2, hud.KillFeedCount);
+        Assert.Equal("Red 5 forced you into the ground", hud.KillFeedText(0));
+        Assert.Equal("You forced Red 5 into the ground", hud.KillFeedText(1));
+        Assert.True(hud.KillFeedIsCrash(0));
+        Assert.True(hud.KillFeedIsCrash(1));
+        Assert.Equal(1, hud.Kills); // the pursuer gets the kill
+        Assert.Equal(1, hud.Deaths);
+        hud.Tick(OneStep);
+        Assert.Equal("You forced Red 5 into the ground", hud.KillFeedText(1));
+    }
+
+    [Fact]
+    public void Shot_down_plane_hitting_the_ground_later_stays_shot_down()
+    {
+        var (hud, bus) = Started();
+        bus.Send(new PlaneDestroyed(6, 2));
+        hud.Tick(OneStep);
+        bus.Send(new PlaneCrashed(6, Vector3.Zero, 60f)); // falling wreck lands; Damage sends nothing
+        Assert.Equal(1, hud.KillFeedCount);
+        Assert.Equal("Blue 2 shot down Red 6", hud.KillFeedText(0));
+        Assert.False(hud.KillFeedIsCrash(0));
+        // A crash from an earlier step does not mark a later downing of that plane.
+        hud.Tick(OneStep);
+        bus.Send(new PlaneDestroyed(6, 0));
+        Assert.Equal("You shot down Red 6", hud.KillFeedText(1));
+    }
+
+    [Fact]
+    public void Shoot_down_in_the_same_step_as_another_planes_crash_is_no_crash()
+    {
+        var (hud, bus) = Started();
+        bus.Send(new PlaneCrashed(4, Vector3.Zero, 40f));
+        bus.Send(new PlaneDestroyed(5, 0));
+        bus.Send(new PlaneDestroyed(4, -1));
+        Assert.Equal("You shot down Red 5", hud.KillFeedText(0));
+        Assert.False(hud.KillFeedIsCrash(0));
+        Assert.Equal("Red 4 crashed", hud.KillFeedText(1));
+    }
+
+    private static PlaneState Flying(float x, float y, float z, float verticalSpeed, bool alive = true) =>
+        new(0, new Vector3(x, y, z), Quaternion.Identity, new Vector3(0f, verticalSpeed, -50f), 50f, 0.8f, alive);
+
+    [Theory]
+    [InlineData(59f, -1f, true)]
+    [InlineData(10f, -20f, true)]
+    [InlineData(-1f, -5f, true)]
+    [InlineData(61f, -10f, false)] // high enough
+    [InlineData(30f, 0f, false)]   // level
+    [InlineData(30f, -0.2f, false)] // barely sinking: no flicker in level flight
+    [InlineData(30f, 5f, false)]   // climbing
+    public void Pull_up_rule(float height, float verticalSpeed, bool warn) =>
+        Assert.Equal(warn, HudModule.PullUpRule(height, verticalSpeed));
+
+    [Fact]
+    public void Pull_up_flashes_faster_when_lower()
+    {
+        Assert.Equal(HudModule.PullUpSlowHz, HudModule.PullUpFlashHzAt(HudModule.PullUpHeight), 4);
+        Assert.Equal(HudModule.PullUpFastHz, HudModule.PullUpFlashHzAt(0f), 4);
+        Assert.Equal(HudModule.PullUpFastHz, HudModule.PullUpFlashHzAt(-3f), 4);
+        Assert.True(HudModule.PullUpFlashHzAt(10f) > HudModule.PullUpFlashHzAt(30f));
+        Assert.True(HudModule.PullUpFlashHzAt(30f) > HudModule.PullUpFlashHzAt(50f));
+        Assert.True(HudModule.PullUpFastHz > HudModule.PullUpSlowHz);
+    }
+
+    [Fact]
+    public void Pull_up_measures_height_above_the_terrain()
+    {
+        // The same world Y: well clear over the plain, low over a mountain.
+        float plain = Terrain.HeightAt(0f, 0f);
+        float mountain = Terrain.HeightAt(1350f, 150f);
+        Assert.True(mountain > 150f);
+        float y = mountain + 40f;
+        var (hud, bus) = Started();
+        bus.Send(Flying(0f, y, 0f, -5f));
+        hud.Tick(OneStep);
+        Assert.Equal(y - plain, hud.HeightAboveGround, 3);
+        Assert.False(hud.PullUpWarning);
+
+        bus.Send(Flying(1350f, y, 150f, -5f));
+        hud.Tick(OneStep);
+        Assert.Equal(40f, hud.HeightAboveGround, 3);
+        Assert.True(hud.PullUpWarning);
+        Assert.Equal(HudModule.PullUpFlashHzAt(40f), hud.PullUpFlashHz, 4);
+        Assert.Equal("PULL UP!", HudModule.PullUpText);
+    }
+
+    [Fact]
+    public void Pull_up_only_while_descending_low_and_flying()
+    {
+        float ground = Terrain.HeightAt(10f, -20f);
+        var (hud, bus) = Started();
+        hud.Tick(OneStep);
+        Assert.False(hud.PullUpWarning); // no plane yet
+
+        bus.Send(Flying(10f, ground + 30f, -20f, 8f));
+        hud.Tick(OneStep);
+        Assert.False(hud.PullUpWarning); // climbing
+        Assert.Equal(0f, hud.PullUpFlashHz);
+
+        bus.Send(Flying(10f, ground + 30f, -20f, -8f));
+        hud.Tick(OneStep);
+        Assert.True(hud.PullUpWarning);
+        Assert.True(hud.PullUpFlashOn); // lit as soon as it starts
+
+        bus.Send(Flying(10f, ground + 30f, -20f, -8f, alive: false));
+        hud.Tick(OneStep);
+        Assert.False(hud.PullUpWarning); // a falling wreck gets no warning
+
+        bus.Send(Flying(10f, ground + 30f, -20f, -8f));
+        bus.Send(new PlaneDestroyed(0, -1));
+        hud.Tick(OneStep);
+        Assert.False(hud.PullUpWarning); // down
+
+        bus.Send(new PlaneRespawn(0));
+        hud.Tick(OneStep);
+        Assert.True(hud.PullUpWarning);
+
+        bus.Send(Plane(50f, 300f, planeId: 3)); // another plane's state changes nothing
+        hud.Tick(OneStep);
+        Assert.True(hud.PullUpWarning);
+    }
+
+    // Counts the lit -> dark flips over 2 s of Ticks held at one height.
+    private static int Flashes(float height)
+    {
+        float ground = Terrain.HeightAt(10f, -20f);
+        var (hud, bus) = Started();
+        int flips = 0;
+        bool was = true;
+        for (int i = 0; i < 120; i++)
+        {
+            bus.Send(Flying(10f, ground + height, -20f, -5f));
+            hud.Tick(OneStep);
+            Assert.True(hud.PullUpWarning);
+            if (was && !hud.PullUpFlashOn)
+                flips++;
+            was = hud.PullUpFlashOn;
+        }
+        return flips;
+    }
+
+    [Fact]
+    public void Pull_up_blinks_at_its_rate()
+    {
+        int high = Flashes(55f);
+        int low = Flashes(5f);
+        Assert.InRange(high, 4, 6);   // 2.5 Hz for 2 s
+        Assert.InRange(low, 14, 16);  // 7.5 Hz for 2 s
     }
 
     [Fact]
@@ -661,6 +847,11 @@ public class HudModuleTests
         var down = capture.Down!;
         var respawn = capture.Respawn!;
         var repair = capture.Repair!;
+        var crash = capture.Crash!;
+        var crashed = new PlaneCrashed(6, Vector3.Zero, 40f);
+        var forced = new PlaneDestroyed(6, 2);
+        var alone = new PlaneDestroyed(7, -1);
+        var low = new PlaneState(0, new Vector3(10f, 20f, -20f), Quaternion.Identity, new Vector3(0f, -6f, -50f), 50f, 0.8f);
         var repairing = Repair(PlanePart.Tail, 0.4f, 3);
         var released = NoRepair(3);
         var parts = new PlaneDamageState(0, 0.7f, 0.4f, 0.2f, 0f, false);
@@ -694,6 +885,12 @@ public class HudModuleTests
             gun.Handle(in boosted);
             _ = quiet.BoostCountdownText;
             _ = quiet.KillFeedText(quiet.KillFeedCount - 1);
+            crash.Handle(in crashed);
+            down.Handle(in forced);
+            down.Handle(in alone);
+            _ = quiet.KillFeedText(quiet.KillFeedCount - 1);
+            plane.Handle(in low);
+            quiet.Tick(OneStep);
         }
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 1000; i++)
@@ -729,6 +926,14 @@ public class HudModuleTests
             _ = quiet.BoostCountdownText;
             _ = quiet.BoostPulsing;
             _ = quiet.BoostPopup;
+            crash.Handle(in crashed);
+            down.Handle(in forced);
+            _ = quiet.KillFeedText(quiet.KillFeedCount - 1);
+            down.Handle(in alone);
+            _ = quiet.KillFeedText(quiet.KillFeedCount - 1);
+            plane.Handle(in low);
+            _ = quiet.PullUpFlashOn;
+            _ = quiet.PullUpFlashHz;
             quiet.Tick(OneStep);
         }
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
@@ -746,6 +951,7 @@ public class HudModuleTests
         public IMessageHandler<PlaneDestroyed>? Down;
         public IMessageHandler<PlaneRespawn>? Respawn;
         public IMessageHandler<RepairState>? Repair;
+        public IMessageHandler<PlaneCrashed>? Crash;
 
         public void Subscribe<T>(IMessageHandler<T> handler) where T : struct
         {
@@ -763,6 +969,8 @@ public class HudModuleTests
                 Respawn = respawn;
             if (handler is IMessageHandler<RepairState> repair)
                 Repair = repair;
+            if (handler is IMessageHandler<PlaneCrashed> crash)
+                Crash = crash;
         }
 
         public void Publish<T>(in T message) where T : struct { }

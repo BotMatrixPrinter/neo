@@ -13,5 +13,6 @@
     <ProjectReference Include="../../Flight/Contract/Neo.Flight.Contract.csproj" />
     <ProjectReference Include="../../Guns/Contract/Neo.Guns.Contract.csproj" />
     <ProjectReference Include="../../Targets/Contract/Neo.Targets.Contract.csproj" />
+    <ProjectReference Include="../../World/Contract/Neo.World.Contract.csproj" />
   </ItemGroup>
 </Project>

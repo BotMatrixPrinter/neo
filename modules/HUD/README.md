@@ -1,7 +1,7 @@
 # HUD
 
 The on-screen display: markers on the other planes (off-screen arrows toward them), speed, altitude, gun heat, balloons popped, the player's damage, kills
-and deaths, the kill feed and the "shot down" countdown, in the game's cartoon
+and deaths, the kill feed (with crashes), the "PULL UP!" warning and the "shot down" countdown, in the game's cartoon
 style (dark rounded panels with a gold edge, bold outlined text).
 
 ## Messages
@@ -11,7 +11,8 @@ Publishes nothing; its Contract (`Neo.HUD.Contract`) is empty for now.
 Uses other modules' Contracts: reads `Neo.Flight.PlaneState` (every plane; teams from `Neo.Flight.Teams`), `Neo.Guns.GunState`
 (plane 0), `Neo.Targets.TargetDestroyed` (any target), and from `Neo.Damage`:
 `PlaneDamageState` (plane 0), `PlaneDestroyed` (any plane), `PlaneRespawn` (plane 0) and
-`RepairState` (plane 0).
+`RepairState` (plane 0), `Neo.Flight.PlaneCrashed` (any plane) and `Neo.World.Terrain.HeightAt`
+(the ground under plane 0).
 
 Plane names (the "Enemy Planes" wave): 0 is the player, "You"; 1-3 are "Blue <id>" (Allies),
 4-7 "Red <id>" (Central).
@@ -54,6 +55,17 @@ Plane names (the "Enemy Planes" wave): 0 is the player, "You"; 1-3 are "Blue <id
   `KillFeedVictim/Shooter(i)`, `KillFeedSecondsLeft(i)`. Lines: "You shot down Red 5",
   "Red 4 shot you down", "Blue 2 shot down Red 6", "Red 5 went down" (downed itself); built once
   (`KillLine`, `PlaneName`).
+- Crashes in the feed (`KillFeedIsCrash(i)`, `CrashLine`, prebuilt): a `PlaneDestroyed` with
+  `ShooterPlaneId` -1 reads "Red 5 crashed" / "You crashed"; one that comes in the same step (no
+  Tick between, either order) as that plane's `PlaneCrashed` is a crash forced by its shooter (the
+  last attacker Damage credits): "Red 5 forced you into the ground", "You forced Red 5 into the
+  ground", "Blue 2 forced Red 6 into the ground". A plane shot down earlier whose wreck then hits
+  the ground keeps its "shot down" line. A forced crash by the player counts as a kill.
+- "PULL UP!" (`PullUpText`): `HeightAboveGround` is plane 0's Y minus `Terrain.HeightAt` under it
+  (each Tick). `PullUpWarning` while plane 0 is alive and not down, below 60 m above the terrain
+  (`PullUpHeight`) and sinking faster than 0.5 m/s (`PullUpSinkRate`; `PullUpRule`). It flashes
+  (`PullUpFlashOn`, lit the first half of each flash, lit at once when it starts) at
+  `PullUpFlashHz`: 2 Hz at 60 m rising linearly to 8 Hz at the ground (`PullUpFlashHzAt`).
 - Shot down: `PlayerDown` from plane 0's `PlaneDestroyed` until its `PlaneRespawn`;
   `RespawnSecondsLeft` counts down from 5 each Tick, `RespawnCountdown` is it rounded up (5..1,
   at least 1 while down) and `RespawnText` "Back in the air in N" (prebuilt; empty when up).
@@ -96,6 +108,8 @@ panels anchored to the corners:
   behind the camera an arrow on the 40%-of-height circle pointing where to turn. Allies green and
   rounded, Central red and sharp. Projected with `GetViewport().GetCamera3D()`, positions
   interpolated between ticks;
+- upper center: a big red outlined "PULL UP!" while the warning is up, blinking (dimmed off) at its
+  rate;
 - while the player is down: a red tint, a big centered "SHOT DOWN!" that pops in, and
   "Back in the air in N" under it.
 
@@ -107,19 +121,26 @@ every 10 s Red 5 popping a balloon at 0.1 s and the player at 0.6 s every other 
 runs 20 s instead of 60, so the pulse shows soon), six other planes around the player (three ahead with markers, three off screen; one more is down),
 with its own camera following the player, and every 10 s two kills, then the player's parts wearing down until shot down at 1.3 s and back 5 s later; at 6.6 s the
 engine and left wing are hit (the hint), at 7.1 s the engine is repaired (Repair held) and at 9.5 s
-let go ("Repair cancelled").
+let go ("Repair cancelled"). Every third cycle (20-30 s, 50-60 s, ...) Red 6 crashes on its own at
+0.8 s ("Red 6 crashed") and the player dives at the ground ("PULL UP!") until Red 5 forces it into the
+ground at 1.3 s.
 
 Screenshots (not committed): `./screenshot.sh modules/HUD/Godot/Main.tscn` (`HUD.png`, shot
 down), damaged but flying, with the plane markers, `FRAMES=65 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-damage`, and,
 overheated, `FRAMES=200 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-overheated`; repair:
 `FRAMES=415` (`HUD-repair-hint`), `FRAMES=520` (`HUD-repairing`), `FRAMES=580` (`HUD-repair-cancelled`); boost: `FRAMES=50` (`HUD-boost-popup`, the pop-up and the
-badge), `FRAMES=900` (`HUD-boost-pulse`, the last 10 s).
+badge), `FRAMES=900` (`HUD-boost-pulse`, the last 10 s); crashes: `FRAMES=1250` (`HUD-pull-up`, low and
+diving), `FRAMES=1340` (`HUD-forced-crash`, "Red 5 forced you into the ground").
 
 ## Tests (`Tests/`)
 
 `HudModuleTests` (with a fake bus): km/h conversion, altitude, other planes ignored, previous
 values for interpolation, heat and overheat, counting pops, part levels and the damage panel
-(plane 0 only), plane names and kill feed lines, the feed's 5 s and its limit, balloon pops in the feed (by anyone, none for -1),
+(plane 0 only), plane names and kill feed lines, crash lines ("crashed" for no shooter, "forced ... into the
+ground" when the `PlaneCrashed` comes before or after the `PlaneDestroyed` in one step, a wreck
+landing after a shoot-down stays "shot down", another plane's crash marks nothing), the "PULL UP!"
+rule (height and sink thresholds, height above the terrain not world Y, only alive and up, flash
+rate rising when lower and the blink count over 2 s), the feed's 5 s and its limit, balloon pops in the feed (by anyone, none for -1),
 the boost badge (countdown texts, a whole 60 s boost tick by tick, the pulse in the last 10 s, plane
 0 only), the "+50% damage!" pop-up (only the player's pops, 1.5 s, restarted), kills and deaths,
 the shot-down countdown to the respawn, markers only for other alive planes and their interpolated

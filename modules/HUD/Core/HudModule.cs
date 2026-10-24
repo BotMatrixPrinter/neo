@@ -4,6 +4,7 @@ using Neo.Flight;
 using Neo.Guns;
 using Neo.Shell;
 using Neo.Targets;
+using Neo.World;
 
 namespace Neo.HUD;
 
@@ -17,7 +18,9 @@ namespace Neo.HUD;
 /// (<see cref="PlaneDestroyed"/>), and the "shot down" countdown until its
 /// <see cref="PlaneRespawn"/>, and plane 0's in-flight repair (<see cref="RepairState"/>). Plane 0's
 /// balloon-pop damage boost (<see cref="GunState.BoostSecondsLeft"/>), a "+50% damage!" pop-up when
-/// it pops one, and every known shooter's pop in the kill feed. Publishes nothing; allocation-free (texts come from tables built once).
+/// it pops one, and every known shooter's pop in the kill feed. Crashes (<see cref="PlaneCrashed"/>) read
+/// "Red 5 crashed" / "Red 4 forced you into the ground" in the feed, and "PULL UP!" warns the player
+/// low over World's <see cref="Terrain"/> while descending. Publishes nothing; allocation-free (texts come from tables built once).
 /// </summary>
 public sealed class HudModule : IModule
 {
@@ -68,6 +71,21 @@ public sealed class HudModule : IModule
     /// <summary>Highest boost countdown shown, seconds ("9:59").</summary>
     public const int MaxBoostCountdown = 599;
 
+    /// <summary>"PULL UP!" shows below this height above the terrain (m), while descending.</summary>
+    public const float PullUpHeight = 60f;
+
+    /// <summary>Descending: sinking faster than this (m/s), so level flight does not flicker the warning.</summary>
+    public const float PullUpSinkRate = 0.5f;
+
+    /// <summary>Flashes per second of "PULL UP!" at <see cref="PullUpHeight"/>.</summary>
+    public const float PullUpSlowHz = 2f;
+
+    /// <summary>Flashes per second of "PULL UP!" at the ground.</summary>
+    public const float PullUpFastHz = 8f;
+
+    /// <summary>The warning's text.</summary>
+    public const string PullUpText = "PULL UP!";
+
     private const int MaxCountdown = 9;
     private const int PartCount = 4;
 
@@ -75,6 +93,7 @@ public sealed class HudModule : IModule
     private static readonly string[] KillLines = BuildKillLines();
     private static readonly string[] RespawnTexts = BuildRespawnTexts();
     private static readonly string[] BalloonLines = BuildBalloonLines();
+    private static readonly string[] CrashLines = BuildCrashLines();
     private static readonly string[] ClockTexts = BuildClockTexts();
     private static readonly string[] RepairingTexts = { "REPAIRING ENGINE", "REPAIRING LEFT WING", "REPAIRING RIGHT WING", "REPAIRING TAIL" };
     private static readonly string[] MoreTexts = { "", "1 more", "2 more", "3 more" };
@@ -86,11 +105,18 @@ public sealed class HudModule : IModule
     private readonly PlaneDownHandler _planeDownHandler;
     private readonly RespawnHandler _respawnHandler;
     private readonly RepairHandler _repairHandler;
+    private readonly CrashHandler _crashHandler;
+    // Planes that crashed / were destroyed since the last Tick: Flight's PlaneCrashed and Damage's
+    // PlaneDestroyed for one crash arrive in the same step, in either order.
+    private readonly bool[] _crashedNow = new bool[Planes];
+    private readonly bool[] _destroyedNow = new bool[Planes];
+    private double _pullUpPhase;
     private RepairState _repair;
     private readonly int[] _feedVictim = new int[KillFeedCapacity];
     private readonly int[] _feedShooter = new int[KillFeedCapacity];
     private readonly double[] _feedLeft = new double[KillFeedCapacity];
     private readonly bool[] _feedBalloon = new bool[KillFeedCapacity];
+    private readonly bool[] _feedCrash = new bool[KillFeedCapacity];
     private PlaneDamageState _damage = new(PlaneId, 1f, 1f, 1f, 1f, true);
     private PlaneState _plane;
     private readonly PlaneState[] _latest = new PlaneState[Planes];
@@ -108,6 +134,7 @@ public sealed class HudModule : IModule
         _planeDownHandler = new PlaneDownHandler(this);
         _respawnHandler = new RespawnHandler(this);
         _repairHandler = new RepairHandler(this);
+        _crashHandler = new CrashHandler(this);
     }
 
     /// <summary>A <see cref="PlaneState"/> for plane 0 has been received.</summary>
@@ -256,12 +283,43 @@ public sealed class HudModule : IModule
     /// <summary>"Back in the air in N" for <see cref="RespawnCountdown"/>; empty when the player is up.</summary>
     public string RespawnText => PlayerDown ? RespawnTexts[RespawnCountdown] : string.Empty;
 
+    /// <summary>Plane 0's height above the terrain (m: world Y minus <see cref="Terrain.HeightAt"/> under it) on the last Tick; 0 before any plane.</summary>
+    public float HeightAboveGround { get; private set; }
+
+    /// <summary>
+    /// "PULL UP!" is up: plane 0 is alive and flying, below <see cref="PullUpHeight"/> above the
+    /// terrain and descending (last Tick); see <see cref="PullUpRule"/>.
+    /// </summary>
+    public bool PullUpWarning { get; private set; }
+
+    /// <summary>Flashes per second of the warning now (<see cref="PullUpFlashHzAt"/>; 0 when not warning).</summary>
+    public float PullUpFlashHz => PullUpWarning ? PullUpFlashHzAt(HeightAboveGround) : 0f;
+
+    /// <summary>The flashing warning is lit: the first half of each flash (lit as soon as the warning starts).</summary>
+    public bool PullUpFlashOn => PullUpWarning && _pullUpPhase < 0.5;
+
+    /// <summary>The warning rule: below <see cref="PullUpHeight"/> above the terrain and sinking faster than <see cref="PullUpSinkRate"/>.</summary>
+    public static bool PullUpRule(float heightAboveGround, float verticalSpeed) =>
+        heightAboveGround < PullUpHeight && verticalSpeed < -PullUpSinkRate;
+
+    /// <summary>Flash rate for a height above the terrain: <see cref="PullUpSlowHz"/> at <see cref="PullUpHeight"/> rising linearly to <see cref="PullUpFastHz"/> at 0 (and below).</summary>
+    public static float PullUpFlashHzAt(float heightAboveGround)
+    {
+        float k = System.Math.Clamp(heightAboveGround / PullUpHeight, 0f, 1f);
+        return PullUpFastHz + (PullUpSlowHz - PullUpFastHz) * k;
+    }
+
     /// <summary>Kill feed lines shown now (at most <see cref="KillFeedCapacity"/>).</summary>
     public int KillFeedCount { get; private set; }
 
     /// <summary>Kill feed line <paramref name="index"/>, 0 the oldest, e.g. "You shot down Red 5" or "Red 5 popped a balloon".</summary>
     public string KillFeedText(int index) =>
-        _feedBalloon[index] ? BalloonLine(_feedShooter[index]) : KillLine(_feedVictim[index], _feedShooter[index]);
+        _feedBalloon[index] ? BalloonLine(_feedShooter[index])
+        : _feedCrash[index] ? CrashLine(_feedVictim[index], _feedShooter[index])
+        : KillLine(_feedVictim[index], _feedShooter[index]);
+
+    /// <summary>Kill feed line <paramref name="index"/> is a crash into the ground (on its own, or forced by its shooter).</summary>
+    public bool KillFeedIsCrash(int index) => _feedCrash[index];
 
     /// <summary>Kill feed line <paramref name="index"/> is a balloon pop (no victim plane).</summary>
     public bool KillFeedIsBalloon(int index) => _feedBalloon[index];
@@ -301,13 +359,29 @@ public sealed class HudModule : IModule
     /// <summary>
     /// The kill feed line for <paramref name="victim"/> downed by <paramref name="shooter"/>:
     /// "You shot down Red 5", "Red 4 shot you down", "Blue 2 shot down Red 6", "Red 5 went down"
-    /// (downed itself). Prebuilt for ids 0-7, so it does not allocate for them.
+    /// (downed itself); no shooter (-1) is a crash on its own: "Red 5 crashed" (<see cref="CrashLine"/>).
+    /// Prebuilt for ids 0-7, so it does not allocate for them.
     /// </summary>
     public static string KillLine(int victim, int shooter)
     {
-        if (victim >= 0 && victim < Planes && shooter >= 0 && shooter < Planes)
+        if (shooter < 0)
+            return CrashLine(victim, shooter);
+        if (victim >= 0 && victim < Planes && shooter < Planes)
             return KillLines[victim * Planes + shooter];
         return BuildKillLine(victim, shooter);
+    }
+
+    /// <summary>
+    /// The kill feed line for <paramref name="victim"/> crashing into the ground: "Red 5 crashed",
+    /// "You crashed" with no shooter (-1, or itself); forced by a recent attacker <paramref name="shooter"/>:
+    /// "Red 5 forced you into the ground", "You forced Red 5 into the ground", "Blue 2 forced Red 6
+    /// into the ground". Prebuilt for victims 0-7 and shooters -1..7.
+    /// </summary>
+    public static string CrashLine(int victim, int shooter)
+    {
+        if (victim >= 0 && victim < Planes && shooter >= -1 && shooter < Planes)
+            return CrashLines[victim * (Planes + 1) + shooter + 1];
+        return BuildCrashLine(victim, shooter);
     }
 
     /// <summary>The kill feed line for a balloon popped by <paramref name="shooter"/>: "Red 5 popped a balloon", "You popped a balloon". Prebuilt for ids 0-7.</summary>
@@ -323,6 +397,7 @@ public sealed class HudModule : IModule
         bus.Subscribe(_planeDownHandler);
         bus.Subscribe(_respawnHandler);
         bus.Subscribe(_repairHandler);
+        bus.Subscribe(_crashHandler);
     }
 
     public void Tick(in TickContext tick)
@@ -336,6 +411,9 @@ public sealed class HudModule : IModule
         SpeedKmh = speed;
         AltitudeMeters = altitude;
         _sampled = HasPlane;
+
+        System.Array.Clear(_crashedNow);
+        System.Array.Clear(_destroyedNow);
 
         double step = tick.StepSeconds;
         if (RepairCancelledSecondsLeft > 0.0)
@@ -351,6 +429,19 @@ public sealed class HudModule : IModule
         if (PlayerDown)
             RespawnSecondsLeft = System.Math.Max(0.0, RespawnSecondsLeft - step);
 
+        // "PULL UP!": height over the terrain under plane 0; the flash phase runs while it warns.
+        Vector3 at = _plane.Position;
+        HeightAboveGround = HasPlane ? at.Y - Terrain.HeightAt(at.X, at.Z) : 0f;
+        bool warn = HasPlane && _plane.Alive && !PlayerDown && PullUpRule(HeightAboveGround, _plane.Velocity.Y);
+        if (!warn)
+            _pullUpPhase = 0.0;
+        else if (PullUpWarning)
+        {
+            _pullUpPhase += PullUpFlashHzAt(HeightAboveGround) * step;
+            _pullUpPhase -= System.Math.Floor(_pullUpPhase);
+        }
+        PullUpWarning = warn;
+
         // Age the kill feed; drop lines whose 5 s are up, keeping the rest oldest first.
         int kept = 0;
         for (int i = 0; i < KillFeedCount; i++)
@@ -362,6 +453,7 @@ public sealed class HudModule : IModule
             _feedShooter[kept] = _feedShooter[i];
             _feedLeft[kept] = left;
             _feedBalloon[kept] = _feedBalloon[i];
+            _feedCrash[kept] = _feedCrash[i];
             kept++;
         }
         KillFeedCount = kept;
@@ -409,7 +501,30 @@ public sealed class HudModule : IModule
             RepairCancelledSecondsLeft = 0.0;
             RespawnSecondsLeft = DamageLimits.RespawnSeconds;
         }
-        AddFeedLine(victim, shooter, false);
+        bool known = victim >= 0 && victim < Planes;
+        if (known)
+            _destroyedNow[victim] = true;
+        AddFeedLine(victim, shooter, false, shooter < 0 || (known && _crashedNow[victim]));
+    }
+
+    // A plane hit the ground. If Damage already downed it this step, its line is a crash; if Damage
+    // downs it after this (same step), OnPlaneDestroyed sees it. A plane shot down earlier that hits
+    // the ground while falling keeps its "shot down" line.
+    private void OnPlaneCrashed(in PlaneCrashed message)
+    {
+        int id = message.PlaneId;
+        if (id < 0 || id >= Planes)
+            return;
+        _crashedNow[id] = true;
+        if (!_destroyedNow[id])
+            return;
+        for (int i = KillFeedCount - 1; i >= 0; i--)
+        {
+            if (_feedBalloon[i] || _feedVictim[i] != id)
+                continue;
+            _feedCrash[i] = true;
+            return;
+        }
     }
 
     // A balloon popped: counted; with a known shooter it goes in the kill feed, and the player's own
@@ -422,10 +537,10 @@ public sealed class HudModule : IModule
             return;
         if (shooter == PlaneId)
             BoostPopupSecondsLeft = BoostPopupSeconds;
-        AddFeedLine(-1, shooter, true);
+        AddFeedLine(-1, shooter, true, false);
     }
 
-    private void AddFeedLine(int victim, int shooter, bool balloon)
+    private void AddFeedLine(int victim, int shooter, bool balloon, bool crash)
     {
         if (KillFeedCount == KillFeedCapacity)
         {
@@ -435,6 +550,7 @@ public sealed class HudModule : IModule
                 _feedShooter[i - 1] = _feedShooter[i];
                 _feedLeft[i - 1] = _feedLeft[i];
                 _feedBalloon[i - 1] = _feedBalloon[i];
+                _feedCrash[i - 1] = _feedCrash[i];
             }
             KillFeedCount--;
         }
@@ -442,6 +558,7 @@ public sealed class HudModule : IModule
         _feedShooter[KillFeedCount] = shooter;
         _feedLeft[KillFeedCount] = KillFeedSeconds;
         _feedBalloon[KillFeedCount] = balloon;
+        _feedCrash[KillFeedCount] = crash;
         KillFeedCount++;
     }
 
@@ -469,6 +586,22 @@ public sealed class HudModule : IModule
         if (victim == PlaneId)
             return PlaneName(shooter) + " shot you down";
         return PlaneName(shooter) + " shot down " + PlaneName(victim);
+    }
+
+    private static string[] BuildCrashLines()
+    {
+        var lines = new string[Planes * (Planes + 1)];
+        for (int victim = 0; victim < Planes; victim++)
+            for (int shooter = -1; shooter < Planes; shooter++)
+                lines[victim * (Planes + 1) + shooter + 1] = BuildCrashLine(victim, shooter);
+        return lines;
+    }
+
+    private static string BuildCrashLine(int victim, int shooter)
+    {
+        if (shooter < 0 || shooter == victim)
+            return PlaneName(victim) + " crashed";
+        return PlaneName(shooter) + " forced " + (victim == PlaneId ? "you" : PlaneName(victim)) + " into the ground";
     }
 
     private static string[] BuildBalloonLines()
@@ -570,6 +703,15 @@ public sealed class HudModule : IModule
             if (message.PlaneId == PlaneId)
                 _module.OnRepair(in message);
         }
+    }
+
+    private sealed class CrashHandler : IMessageHandler<PlaneCrashed>
+    {
+        private readonly HudModule _module;
+
+        public CrashHandler(HudModule module) => _module = module;
+
+        public void Handle(in PlaneCrashed message) => _module.OnPlaneCrashed(in message);
     }
 
     private sealed class RespawnHandler : IMessageHandler<PlaneRespawn>
