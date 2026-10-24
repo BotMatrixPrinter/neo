@@ -8,4 +8,7 @@ public static class DamageLimits
 
     /// <summary>Seconds a downed plane stays down before <see cref="PlaneRespawn"/>.</summary>
     public const double RespawnSeconds = 5.0;
+
+    /// <summary>Seconds of continuously holding Repair to fix one part (see <see cref="RepairState"/>).</summary>
+    public const double RepairSeconds = 4.0;
 }

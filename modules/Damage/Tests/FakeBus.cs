@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Neo.Input;
 using Neo.Shell;
 
 namespace Neo.Damage.Tests;
@@ -37,10 +38,12 @@ internal sealed class FakeBus : IMessageBus
     public void Clear() => Published.Clear();
 }
 
-/// <summary>A bus that keeps only the <see cref="PlaneHit"/> handler and counts what is published (no allocations).</summary>
+/// <summary>A bus that keeps only the <see cref="PlaneHit"/> and <see cref="ControlInput"/> handlers and counts what is published (no allocations).</summary>
 internal sealed class QuietBus : IMessageBus
 {
     public IMessageHandler<PlaneHit>? Hits;
+    public IMessageHandler<ControlInput>? Controls;
+    public int RepairsPublished;
     public int StatesPublished;
     public int Destroyed;
     public int Respawned;
@@ -49,6 +52,8 @@ internal sealed class QuietBus : IMessageBus
     {
         if (handler is IMessageHandler<PlaneHit> hits)
             Hits = hits;
+        if (handler is IMessageHandler<ControlInput> controls)
+            Controls = controls;
     }
 
     public void Publish<T>(in T message) where T : struct
@@ -59,5 +64,7 @@ internal sealed class QuietBus : IMessageBus
             Destroyed++;
         else if (typeof(T) == typeof(PlaneRespawn))
             Respawned++;
+        else if (typeof(T) == typeof(RepairState))
+            RepairsPublished++;
     }
 }
