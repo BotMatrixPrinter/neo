@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using Neo.Flight;
 using Neo.Input;
+using Neo.World;
 
 namespace Neo.Bots;
 
@@ -106,11 +107,15 @@ public sealed class BotPilot
     /// <summary>Share of break turns among the evasions at mid altitude and good speed (each bot ± <see cref="BreakShareSpread"/>).</summary>
     public const float BreakShare = 0.5f;
     public const float BreakShareSpread = 0.15f;
-    /// <summary>Climbs when altitude plus <see cref="GroundLookahead"/> seconds of descent is below this, m.</summary>
+    /// <summary>Climbs when its height above the terrain (<see cref="Terrain.HeightAt"/>) under it or ahead, less <see cref="GroundLookahead"/> seconds of descent, is below this, m.</summary>
     public const float MinAltitude = 80f;
     public const float GroundLookahead = 3f;
+    /// <summary>Looks at the terrain along its path every second over this many seconds ahead.</summary>
+    public const float TerrainLookahead = 5f;
     /// <summary>Climb angle when too low.</summary>
     public const float ClimbAngle = 30f * Deg;
+    /// <summary>Terrain ahead that needs a steeper climb than this to clear: it turns away as it climbs.</summary>
+    public const float TurnAwayAngle = 20f * Deg;
     /// <summary>Half size of the square area (Flight's), m.</summary>
     public const float AreaHalfSize = 2000f;
     /// <summary>Turns back toward the center within this distance of an edge when heading out, m.</summary>
@@ -163,6 +168,10 @@ public sealed class BotPilot
     private float _jinkClock;
     private int _jinkCount;
     private float _jinkPitch, _jinkRoll;
+
+    // Terrain: the highest ground under it and ahead (this step), the side it turns away to.
+    private float _groundAhead;
+    private float _terrainSide;
 
     /// <param name="evasionSkill">How good it is at evading (see <see cref="EvasionSkill"/>).</param>
     public BotPilot(int planeId, float evasionSkill = EvasionSkill)
@@ -232,6 +241,8 @@ public sealed class BotPilot
         _burstClock += dt;
         if (_burstClock >= BurstLength + BurstPause)
             _burstClock -= BurstLength + BurstPause;
+
+        _groundAhead = GroundAhead(in me, forward, TerrainLookahead);
 
         // The nearest alive enemy, and whether one sits on our tail.
         int target = -1;
@@ -374,6 +385,7 @@ public sealed class BotPilot
         _cooldown = 0f;
         _reverseTarget = -1;
         _reverseTime = 0f;
+        _terrainSide = 0f;
         Jinking = false;
         Mode = BotMode.None;
         TargetId = -1;
@@ -389,9 +401,10 @@ public sealed class BotPilot
         _extendTurn = Spread(_id, 300 + _encounter) >= 0f;
         _encounter++;
 
-        float alt = me.Position.Y;
+        // Room to dive: height above the highest ground under it and ahead (the ceiling: absolute).
+        float alt = me.Position.Y - _groundAhead;
         bool slow = me.Speed < MinClimbSpeed;
-        if (alt > HighAltitude)
+        if (me.Position.Y > HighAltitude)
             _evade = r < 0.4f ? BotMode.SplitS : r < 0.75f ? BotMode.RollAway : BotMode.Extend;
         else if (slow)
             _evade = alt > SplitSAltitude && r > 0.6f ? BotMode.RollAway : alt > DiveRoomAltitude ? BotMode.Extend : BotMode.Break;
@@ -472,7 +485,7 @@ public sealed class BotPilot
     {
         float elev = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
         float bank = Bank(me.Orientation);
-        bool lowDive = me.Position.Y < MinAltitude + DiveFloorMargin;
+        bool lowDive = LowDive(in me);
         yaw = 0f;
         switch (_evade)
         {
@@ -536,7 +549,7 @@ public sealed class BotPilot
     {
         if (me.Speed < MinClimbSpeed)
             elevation = MathF.Min(elevation, -SlowDiveAngle);
-        if (me.Position.Y < MinAltitude + DiveFloorMargin)
+        if (LowDive(in me))
             elevation = MathF.Max(elevation, 0f);
         float extra = Math.Clamp((elev - elevation) * 8f, -25f * Deg, 70f * Deg);
         // Softer bank (evasion skill), the full one back once the nose is 1 degree above the elevation: never a climbing turn.
@@ -596,17 +609,80 @@ public sealed class BotPilot
             roll = Math.Clamp(WrapAngle(MathF.Sign(bank) * 120f * Deg - bank) * 3f, -1f, 1f);
     }
 
-    private static bool NeedsClimb(in PlaneState me, Vector3 forward, out Vector3 climb)
+    /// <summary>Dives level off here: less than <see cref="DiveFloorMargin"/> above the safety height over the terrain under it and ahead.</summary>
+    private bool LowDive(in PlaneState me) => me.Position.Y - _groundAhead < MinAltitude + DiveFloorMargin;
+
+    /// <summary>The highest terrain under the plane and along its path, every second for <paramref name="seconds"/> s.</summary>
+    private static float GroundAhead(in PlaneState me, Vector3 forward, float seconds)
     {
-        float predicted = me.Position.Y + MathF.Min(0f, me.Velocity.Y) * GroundLookahead;
-        climb = default;
-        if (predicted >= MinAltitude)
-            return false;
-        Vector3 flat = new(forward.X, 0f, forward.Z);
+        Vector3 step = Flat(me.Velocity, forward) * MathF.Max(me.Speed, MinClimbSpeed);
+        Vector3 p = me.Position;
+        float ground = Terrain.HeightAt(p.X, p.Z);
+        for (float t = 1f; t <= seconds; t += 1f)
+            ground = MathF.Max(ground, Terrain.HeightAt(p.X + step.X * t, p.Z + step.Z * t));
+        return ground;
+    }
+
+    /// <summary>The horizontal direction of <paramref name="v"/> (of <paramref name="forward"/>, or north, if it has none).</summary>
+    private static Vector3 Flat(Vector3 v, Vector3 forward)
+    {
+        Vector3 flat = new(v.X, 0f, v.Z);
+        if (flat.LengthSquared() < 1e-4f)
+            flat = new Vector3(forward.X, 0f, forward.Z);
         if (flat.LengthSquared() < 1e-4f)
             flat = -Vector3.UnitZ;
-        climb = Vector3.Normalize(flat) * MathF.Cos(ClimbAngle) + Vector3.UnitY * MathF.Sin(ClimbAngle);
+        return Vector3.Normalize(flat);
+    }
+
+    /// <summary>
+    /// Too low over the terrain under it or ahead (every second over <see cref="TerrainLookahead"/>
+    /// s along its path; its descent counted for <see cref="GroundLookahead"/> s): climb at
+    /// <see cref="ClimbAngle"/>; when the terrain ahead rises steeper than
+    /// <see cref="TurnAwayAngle"/>, turn away toward the lower side as well.
+    /// </summary>
+    private bool NeedsClimb(in PlaneState me, Vector3 forward, out Vector3 climb)
+    {
+        Vector3 p = me.Position;
+        Vector3 flat = Flat(me.Velocity, forward);
+        float speed = MathF.Max(me.Speed, MinClimbSpeed);
+        float descent = MathF.Min(0f, me.Velocity.Y);
+        float lowest = p.Y + descent * GroundLookahead - Terrain.HeightAt(p.X, p.Z);
+        float slope = 0f;
+        for (float t = 1f; t <= TerrainLookahead; t += 1f)
+        {
+            float x = p.X + flat.X * speed * t, z = p.Z + flat.Z * speed * t;
+            float above = p.Y + descent * MathF.Min(t, GroundLookahead) - Terrain.HeightAt(x, z);
+            lowest = MathF.Min(lowest, above);
+            slope = MathF.Max(slope, (MinAltitude - above) / (speed * t));
+        }
+        climb = default;
+        if (lowest >= MinAltitude)
+        {
+            _terrainSide = 0f;
+            return false;
+        }
+        if (slope > MathF.Tan(TurnAwayAngle))
+        {
+            // Turn away, to the side with the lower terrain (kept until clear).
+            Vector3 right = new(-flat.Z, 0f, flat.X);
+            if (_terrainSide == 0f)
+                _terrainSide = SideGround(p, flat + right, speed) <= SideGround(p, flat - right, speed) ? 1f : -1f;
+            flat = right * _terrainSide;
+        }
+        else
+            _terrainSide = 0f;
+        climb = flat * MathF.Cos(ClimbAngle) + Vector3.UnitY * MathF.Sin(ClimbAngle);
         return true;
+    }
+
+    /// <summary>The highest terrain along the horizontal direction <paramref name="direction"/>, over <see cref="TerrainLookahead"/> s.</summary>
+    private static float SideGround(Vector3 p, Vector3 direction, float speed)
+    {
+        Vector3 step = Vector3.Normalize(direction) * speed;
+        float ground = 0f;
+        for (float t = 1f; t <= TerrainLookahead; t += 1f)
+            ground = MathF.Max(ground, Terrain.HeightAt(p.X + step.X * t, p.Z + step.Z * t));
+        return ground;
     }
 
     private static bool NeedsTurnBack(in PlaneState me, Vector3 forward, out Vector3 home)

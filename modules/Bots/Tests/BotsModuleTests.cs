@@ -3,6 +3,7 @@ using System.Numerics;
 using Neo.Flight;
 using Neo.Input;
 using Neo.Shell;
+using Neo.World;
 using Xunit;
 
 namespace Neo.Bots.Tests;
@@ -72,6 +73,9 @@ public class BotsModuleTests
     }
 
     private static Vector3 Nose(in PlaneState s) => Vector3.Transform(-Vector3.UnitZ, s.Orientation);
+
+    /// <summary>Height above the terrain under the plane, m.</summary>
+    private static float Clearance(in PlaneState s) => s.Position.Y - Terrain.HeightAt(s.Position.X, s.Position.Z);
 
     private static float AngleTo(in PlaneState from, Vector3 point)
         => MathF.Acos(Math.Clamp(Vector3.Dot(Nose(from), Vector3.Normalize(point - from.Position)), -1f, 1f));
@@ -424,13 +428,13 @@ public class BotsModuleTests
         // A pursuer glued to the tail (it can't be shaken off) for 40 s, from mid altitude,
         // high, near the ceiling, low, and slow: the bot never spirals upward, never climbs
         // while slow, stays above 80 m and inside the area. Each bot, from either side.
-        foreach ((float alt, float speed) in new[] { (400f, 50f), (900f, 45f), (990f, 30f), (150f, 42f), (100f, 30f), (500f, 32f) })
+        foreach ((float alt, float speed) in new[] { (400f, 50f), (900f, 45f), (990f, 30f), (150f, 42f), (100f, 30f), (510f, 32f) })
         {
             for (int bot = 1; bot < Teams.PlaneCount; bot++)
             {
                 int enemy = Teams.IsAllies(bot) ? 5 : 1;
                 var rig = new Rig();
-                rig.Set(FakeFlight.Plane(bot, new Vector3(300f, alt, 800f), North, speed: speed), flown: true);
+                rig.Set(FakeFlight.Plane(bot, new Vector3(0f, alt, 800f), North, speed: speed), flown: true);
                 float climbing = 0f, longestClimb = 0f, slowClimbing = 0f, longestSlowClimb = 0f;
                 int evading = 0;
                 for (int i = 0; i < 60 * 40; i++)
@@ -445,7 +449,7 @@ public class BotsModuleTests
                     if (IsEvasion(rig.Module.Pilot(bot).Mode))
                         evading++;
                     string at = $"bot {bot} from {alt} m, {speed} m/s, at {i * Dt:0.0} s";
-                    Assert.True(s.Position.Y > BotPilot.MinAltitude, $"{at}: down to {s.Position.Y} m");
+                    Assert.True(Clearance(s) > BotPilot.MinAltitude, $"{at}: down to {Clearance(s)} m above the ground");
                     Assert.True(MathF.Abs(s.Position.X) < 2000f && MathF.Abs(s.Position.Z) < 2000f, $"{at}: left the area at {s.Position}");
                 }
                 string what = $"bot {bot} from {alt} m, {speed} m/s";
@@ -784,9 +788,94 @@ public class BotsModuleTests
         for (int i = 0; i < 60 * 20; i++)
         {
             rig.Step();
-            lowest = MathF.Min(lowest, rig.States[4].Position.Y);
+            lowest = MathF.Min(lowest, Clearance(rig.States[4]));
         }
-        Assert.True(lowest > 40f, $"lowest {lowest} m");
+        Assert.True(lowest > 40f, $"lowest {lowest} m above the ground");
+    }
+
+    [Theory]
+    [InlineData(150f, 950f, -1350f, 950f)]     // west at the 167 m mountain (-850, 950)
+    [InlineData(1350f, -900f, 1350f, 900f)]    // south at the 207 m mountain (1350, 150)
+    [InlineData(-1450f, 400f, -1450f, -1300f)] // north at the 250 m mountain (-1450, -500)
+    public void ClimbsOrTurnsAwayBeforeAMountainAhead(float fromX, float fromZ, float targetX, float targetZ)
+    {
+        // Level at 100 m over the plain, heading at a mountain's top, chasing a target at that
+        // height beyond it: it climbs or turns away before the mountain, never flying into it.
+        var rig = new Rig();
+        Vector3 from = new(fromX, 100f, fromZ);
+        Vector3 target = new(targetX, 100f, targetZ);
+        rig.Set(FakeFlight.Plane(4, from, target - from), flown: true);
+        rig.Set(FakeFlight.Plane(1, target, North, speed: 0f));
+        bool reacted = false;
+        float lowest = float.MaxValue;
+        for (int i = 0; i < 60 * 40; i++)
+        {
+            rig.Step();
+            PlaneState s = rig.States[4];
+            if (!reacted && rig.Module.Pilot(4).Mode == BotMode.Ground)
+            {
+                // In time: it reacts to the terrain ahead while still well above the ground under it.
+                reacted = true;
+                Assert.True(Clearance(s) > BotPilot.MinAltitude, $"reacted only {Clearance(s)} m above the ground");
+            }
+            lowest = MathF.Min(lowest, Clearance(s));
+        }
+        Assert.True(reacted, "never climbed or turned for the mountain");
+        Assert.True(lowest > 0.5f * BotPilot.MinAltitude, $"down to {lowest} m above the ground");
+    }
+
+    [Fact]
+    public void KeepsEightyMetersAboveHills()
+    {
+        // Flying level at 90 m toward a target at that height beyond rolling hills (up to
+        // about 48 m): it keeps about 80 m above the ground under it, also over the hills.
+        var rig = new Rig();
+        rig.Set(FakeFlight.Plane(4, new Vector3(-200f, 90f, -1200f), -Vector3.UnitX), flown: true);
+        rig.Set(FakeFlight.Plane(1, new Vector3(-1350f, 90f, -1200f), North, speed: 0f));
+        float lowest = float.MaxValue, highestGround = 0f;
+        for (int i = 0; i < 60 * 30; i++)
+        {
+            rig.Step();
+            PlaneState s = rig.States[4];
+            lowest = MathF.Min(lowest, Clearance(s));
+            highestGround = MathF.Max(highestGround, Terrain.HeightAt(s.Position.X, s.Position.Z));
+        }
+        Assert.True(highestGround > 35f, $"flew over hills of {highestGround} m only");
+        Assert.True(lowest > BotPilot.MinAltitude - 5f, $"down to {lowest} m above the ground");
+    }
+
+    [Theory]
+    [InlineData(1050f, 520f, 150f, 1f, 0f)]    // east at the 207 m mountain (1350, 150)
+    [InlineData(1350f, 520f, -150f, 0f, 1f)]   // south at it
+    [InlineData(-1150f, 560f, -500f, -1f, 0f)] // west at the 250 m mountain (-1450, -500)
+    [InlineData(-850f, 470f, 650f, 0f, 1f)]    // south at the 167 m mountain (-850, 950)
+    public void EvasiveDivesNeverEndInTheTerrain(float x, float alt, float z, float headingX, float headingZ)
+    {
+        // A pursuer glued to its tail toward a mountain (each bot): its evasive dives level off
+        // with room to pull out above the terrain ahead (well above the 80 m safety height),
+        // and it stays 80 m above the ground under it.
+        for (int bot = 1; bot < Teams.PlaneCount; bot++)
+        {
+            int enemy = Teams.IsAllies(bot) ? 5 : 1;
+            var rig = new Rig();
+            rig.Set(FakeFlight.Plane(bot, new Vector3(x, alt, z), new Vector3(headingX, 0f, headingZ), speed: 50f), flown: true);
+            bool dived = false;
+            float lowestDive = float.MaxValue, lowest = float.MaxValue;
+            for (int i = 0; i < 60 * 30; i++)
+            {
+                Stick(rig, enemy, bot, 150f, bot % 2 == 0 ? 30f : -30f);
+                rig.Step();
+                PlaneState s = rig.States[bot];
+                bool diving = rig.Module.Pilot(bot).Mode is BotMode.Extend or BotMode.SplitS or BotMode.RollAway;
+                dived |= diving;
+                if (diving)
+                    lowestDive = MathF.Min(lowestDive, Clearance(s));
+                lowest = MathF.Min(lowest, Clearance(s));
+            }
+            Assert.True(dived, $"bot {bot} never dived");
+            Assert.True(lowestDive > BotPilot.MinAltitude + 0.5f * BotPilot.DiveFloorMargin, $"bot {bot} dived down to {lowestDive} m above the ground");
+            Assert.True(lowest > BotPilot.MinAltitude, $"bot {bot} down to {lowest} m above the ground");
+        }
     }
 
     [Fact]
@@ -823,7 +912,7 @@ public class BotsModuleTests
             rig.Step();
             if (i > 60 * 20)
                 farthest = MathF.Max(farthest, new Vector2(rig.States[4].Position.X, rig.States[4].Position.Z).Length());
-            Assert.True(rig.States[4].Position.Y > 100f);
+            Assert.True(Clearance(rig.States[4]) > 100f);
         }
         Assert.True(farthest < 1500f, $"farthest {farthest} m from the center");
     }
@@ -852,7 +941,7 @@ public class BotsModuleTests
             for (int id = 1; id < Teams.PlaneCount; id++)
             {
                 Vector3 p = rig.States[id].Position;
-                Assert.True(p.Y > 40f, $"plane {id} down to {p.Y} m");
+                Assert.True(Clearance(rig.States[id]) > 40f, $"plane {id} down to {Clearance(rig.States[id])} m above the ground at {p}");
                 Assert.True(MathF.Abs(p.X) < 2000f && MathF.Abs(p.Z) < 2000f, $"plane {id} left the area at {p}");
             }
             for (int k = 0; k < rig.Bus.Count; k++)

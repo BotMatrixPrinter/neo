@@ -8,7 +8,8 @@ the same rules. Simple and fun rather than perfect; easy difficulty for now.
 - **Contract** (`Contract/`, namespace `Neo.Bots`): `Pilots` (static): `PlayerId` (0),
   `PlaneCount` (8), `bool IsBot(int planeId)` (true for 1..7). No messages of its own.
 - **Uses**: subscribes to `Neo.Flight.PlaneState` (modules/Flight/Contract) and keeps the
-  latest of each plane; publishes `Neo.Input.ControlInput` (modules/Input/Contract).
+  latest of each plane; publishes `Neo.Input.ControlInput` (modules/Input/Contract); reads
+  the ground's height from `Neo.World.Terrain.HeightAt` (modules/World/Contract).
 - **Core** (`Core/`): `BotsModule` (the `IModule`) owns one `BotPilot` per bot
   (`Pilot(id)`). Each tick, for each bot whose plane has been seen and is `Alive`, in id
   order, it publishes one `ControlInput` for that `PlaneId` (`HasAim` false). A downed or
@@ -22,8 +23,13 @@ the same rules. Simple and fun rather than perfect; easy difficulty for now.
 
 In priority order, each step:
 
-1. **Ground**: if altitude plus 3 s of its current descent is below 80 m, climb at 30
-   degrees on its heading.
+1. **Ground**: every safety height is measured from the terrain (`Terrain.HeightAt`), not
+   from y = 0. It looks under itself and along its path every second over the next 5 s
+   (`TerrainLookahead`); if its height above any of those points, less 3 s of its current
+   descent, is below 80 m, it climbs at 30 degrees on its heading. When the terrain ahead
+   needs a climb steeper than 20 degrees (`TurnAwayAngle`: a hill or mountain too close to
+   climb over), it turns away as well (a climbing turn 90 degrees off its path, to the side
+   whose terrain is lower, kept until clear).
 2. **Edge**: within 600 m of an edge of the 4 km area (|x|, |z| <= 2000 m) and heading
    out, turn back toward the center (easing toward 400 m). Flight's own guard starts at
    400 m, so a bot normally turns first.
@@ -42,11 +48,14 @@ In priority order, each step:
      way.
    - **Roll-away** (`RollAway`, above 500 m): steep descending spiral turn (nose -35 degrees).
 
-   Choice: above 800 m (near Flight's 1000 m ceiling) always a dive (split-S, roll-away or
+   Choice (its altitude for the 500 m and 280 m rooms below is its height above the highest
+   terrain under it and over its next 5 s of flight; the 800 m is from y = 0, for the ceiling):
+   above 800 m (near Flight's 1000 m ceiling) always a dive (split-S, roll-away or
    extend); below 40 m/s a dive (extend, or roll-away above 500 m), or a break with the nose
    10 degrees down (level below 180 m) when below 280 m; otherwise a break about half the time (0.5 ± 0.15 per
    bot), else an extension, sometimes a split-S or roll-away when high enough. Dives level
-   off 100 m above the 80 m safety height. While shot at (attacker within 350 m, nose within
+   off 100 m above the 80 m safety height over the highest terrain under it and ahead, so
+   they stop with room to pull out above it. While shot at (attacker within 350 m, nose within
    10 degrees of the bot; not during a split-S) it **jinks**: random pitch (±0.35 × 0.75) and
    roll (±0.5 × 0.75) offsets, new every (0.3..0.6 s) × 1.25 (`Jinking`).
 
@@ -91,11 +100,12 @@ level turn, not by a loop.
 | `BreakShare` ± `BreakShareSpread` | 0.5 ± 0.15 | share of breaks at mid altitude and good speed, per bot |
 | `BreakBank`, `BreakElevation` | 80 deg, -3 deg | the break turn |
 | `MinClimbSpeed`, `SlowDiveAngle` | 40 m/s, 10 deg | no climbing below it; dive angle when slow |
-| `HighAltitude`, `SplitSAltitude`, `DiveRoomAltitude`, `DiveFloorMargin` | 800, 500, 280, 100 m | dive when high; room for a split-S/roll-away or an extension; dives level off this far above `MinAltitude` |
+| `HighAltitude`, `SplitSAltitude`, `DiveRoomAltitude`, `DiveFloorMargin` | 800, 500, 280, 100 m | dive when high (from y = 0); room for a split-S/roll-away or an extension, and dives level off this far above `MinAltitude` (all above the terrain under it and ahead) |
 | `ExtendDiveAngle`, `ExtendSpeed`, `ExtendDiveTime` | 30 deg, 56 m/s, 3 s | diving extension |
 | `RollAwayElevation` | -35 deg | roll-away dive |
 | `JinkCone`, `JinkPeriod`, `JinkPitch`, `JinkRoll` | 10 deg, 0.45 s (×0.7..1.3), 0.35, 0.5 | jinks while shot at |
-| `MinAltitude`, `GroundLookahead`, `ClimbAngle` | 80 m, 3 s, 30 deg | ground avoidance |
+| `MinAltitude`, `GroundLookahead`, `ClimbAngle` | 80 m, 3 s, 30 deg | ground avoidance: height above the terrain, seconds of descent counted, climb angle |
+| `TerrainLookahead`, `TurnAwayAngle` | 5 s, 20 deg | terrain checked every second this far along its path; terrain ahead needing a steeper climb: turn away too |
 | `EdgeMargin` | 600 m | turn back before the edge |
 | `CircleRadius`, `CircleAltitude`, `CircleThrottle` | 700 m, 400 m, 0.6 | circling without a target |
 | `FineAngle` | 12 deg | below it, fine aim instead of bank and pull |
@@ -116,13 +126,16 @@ delay) when chased, not for an enemy far behind or flying away; breaks toward th
 attacker's side; varies its moves per bot and encounter; dives when slow or high (and, low
 and slow, breaks without climbing); with a pursuer glued to its tail (from mid altitude,
 high, near the ceiling, low, slow) never climbs more than 4 s on end nor while below 40 m/s,
-stays above 80 m and inside the area; evasions end within their time limit, then it attacks
+stays 80 m above the terrain and inside the area; evasions end within their time limit, then it attacks
 (also once shaken off); turns on a pursuer that overshoots; jinks while shot at; with `EvasionSkill` 0.75 against 1.0 it
 evades later, pulls and banks less, jinks less and smaller and evades for less time, picks the
 same moves and attacks with the very same stick; the chased
 flight is deterministic; climbs away from
-the ground; turns back before the edge; circles near the center without a target; a full
-90 s 4 v 4 stays above 40 m and inside the area and shoots; determinism; bots differ and
+the ground; heading level at 100 m at each of the three mountains, it reacts (climbs or turns)
+while still 80 m above the ground and never gets within 40 m of it; flying level at 90 m over
+rolling hills it keeps about 80 m (over 75) above them; chased toward each mountain, every bot dives, its
+dives stay 130 m above the ground and it stays 80 m above it; turns back before the edge; circles near the center without a target; a full
+90 s 4 v 4 stays 40 m above the terrain and inside the area and shoots; determinism; bots differ and
 leave formation; the host can create the module (parameterless constructor); no allocations
 per tick.
 
