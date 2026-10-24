@@ -1,6 +1,8 @@
 // Toon material of the ground: a patchwork of fields (greens and golden yellows) with dark
 // hedges and ink lines between them on the low land, grassier hills, rocky faceted mountain
-// slopes with a snow or pale rock cap (on the wall ring: higher lines, taller strata), all painted from the world position and normal; and the
+// slopes with a snow or pale rock cap (on the range's ring, through the uniforms: no fields but
+// grass and forest green on the foothills, rock higher up, soft strata, snow from about 1400 m),
+// all painted from the world position and normal; and the
 // water (river, lakes) where UV.x < 0: bright blue with soft foam at the shore and animated
 // ripples. UV.x is set by WorldView: height above the water on land, minus the depth on water.
 shader_type spatial;
@@ -16,6 +18,13 @@ uniform float line_wander = 1.0;
 // How much darker the dark rock strata are (1: as dark as ROCK_DARK), and how much higher snow starts on steep rock (m).
 uniform float strata_contrast = 1.0;
 uniform float snow_steep = 6.0;
+// How much of the low land is patchwork fields (0: meadow only), up to which height (m) a darker forest
+// green mottles the grass, and the heights (m) over which meadow, rock (and rock on steep ground) take over.
+uniform float fields_share = 1.0;
+uniform float forest_line = 0.0;
+uniform vec2 meadow_band = vec2(14.0, 40.0);
+uniform vec2 rock_band = vec2(48.0, 80.0);
+uniform vec2 steep_rock_band = vec2(28.0, 48.0);
 uniform float ink_fade_start = 500.0;
 uniform float ink_fade_end = 1600.0;
 
@@ -31,6 +40,7 @@ const vec3 FIELDS[7] = vec3[7](
 const vec3 HEDGE = vec3(0.30, 0.52, 0.25);
 const vec3 INK = vec3(0.13, 0.10, 0.14);
 const vec3 MEADOW = vec3(0.45, 0.72, 0.32);
+const vec3 FOREST = vec3(0.24, 0.50, 0.25);
 const vec3 ROCK = vec3(0.68, 0.60, 0.52);
 const vec3 ROCK_DARK = vec3(0.56, 0.49, 0.44);
 const vec3 PALE_ROCK = vec3(0.80, 0.77, 0.71);
@@ -108,14 +118,19 @@ void fragment() {
 	color = mix(color, HEDGE, line(edge, 1.4));
 	color = mix(color, INK, line(abs(edge - 1.6), 0.3) * 0.8 * ink_fade);
 
-	// Hills: the patchwork fades into meadow as the land rises.
+	// Hills: the patchwork fades into meadow as the land rises (on the range: meadow only, with
+	// patches of darker forest green that thin out toward the forest line).
 	float y = world_pos.y;
-	color = mix(color, MEADOW * (0.9 + 0.2 * noise(p * 0.01)), smoothstep(14.0, 40.0, y) * 0.65);
+	vec3 meadow = MEADOW * (0.9 + 0.2 * noise(p * 0.01));
+	float forest = smoothstep(0.45, 0.6, noise(p * 0.004) + 0.5 * noise(p * 0.017) - 0.6 * y / max(forest_line, 1.0)) * step(1.0, forest_line);
+	meadow = mix(meadow, FOREST * (0.9 + 0.2 * noise(p * 0.03)), forest);
+	color = mix(meadow, color, fields_share);
+	color = mix(color, meadow, smoothstep(meadow_band.x, meadow_band.y, y) * 0.65 * fields_share);
 
 	// Mountains: rock on the high and steep ground, banded in cartoon strata, drawn with flat
 	// facets (the triangle's own normal) for a low-poly look; snow or pale rock on the tops.
 	float steep = 1.0 - smoothstep(0.62, 0.8, normalize(world_normal).y);
-	float rock = max(smoothstep(48.0, 80.0, y), steep * smoothstep(28.0, 48.0, y));
+	float rock = max(smoothstep(rock_band.x, rock_band.y, y), steep * smoothstep(steep_rock_band.x, steep_rock_band.y, y));
 	float strata = step(0.5, fract(y / strata_size + 0.6 * noise(p * 0.012 * 17.0 / strata_size) + 0.004 * dot(p, vec2(0.6, 0.8))));
 	color = mix(color, mix(ROCK, ROCK_DARK, (1.0 - strata) * strata_contrast) * (0.92 + 0.16 * noise(p * 0.04)), rock);
 	color = mix(color, PALE_ROCK, smoothstep(pale_line - 8.0, pale_line + 8.0, y + line_wander * 14.0 * noise(p * 0.02)));

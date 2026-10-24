@@ -3,11 +3,11 @@ using System;
 namespace Neo.World;
 
 /// <summary>
-/// Layout of the wall ring mesh (WorldView builds it, the tests check it against <see cref="Terrain.HeightAt"/>):
+/// Layout of the mountain range's ring mesh (WorldView builds it, the tests check it against <see cref="Terrain.HeightAt"/>):
 /// <see cref="Rings"/> square rings around the playable square, ring <c>r</c> at <see cref="Offset"/> m beyond its
 /// edge, each with <see cref="Segments"/> vertices; ring 0 is the ground mesh's border, so the two meet without a
-/// seam. Rings sit every <see cref="NearStep"/> m up to <see cref="NearReach"/> (the wall's face and crest), then
-/// farther apart out to <see cref="FarReach"/> (the ranges behind, fading into haze). Quad (r, s) joins vertices
+/// seam. Rings sit every <see cref="NearStep"/> m up to <see cref="NearReach"/> (the foothills), then each a little
+/// farther apart (denser near the edge, coarser far away) out to <see cref="FarReach"/> (the rows behind, fading into haze). Quad (r, s) joins vertices
 /// s and s + 1 of rings r and r + 1, split along the diagonal from (r, s + 1) to (r + 1, s). Pure, no Godot.
 /// </summary>
 public static class WallMesh
@@ -16,16 +16,16 @@ public static class WallMesh
     public const int Segments = 4 * Terrain.GridCells;
 
     /// <summary>Distance (m) between rings up to <see cref="NearReach"/>.</summary>
-    public const float NearStep = 6f;
+    public const float NearStep = 8f;
 
     /// <summary>Distance (m) beyond the edge up to which rings sit every <see cref="NearStep"/> m.</summary>
-    public const float NearReach = 510f;
+    public const float NearReach = 400f;
 
     /// <summary>Distance (m) beyond the edge of the outermost ring (at least).</summary>
     public const float FarReach = 6000f;
 
     private const int NearRings = (int)(NearReach / NearStep);
-    private const float Growth = 1.12f;
+    private const float Growth = 1.05f;
 
     /// <summary>Number of rings, ring 0 (at the edge) included.</summary>
     public static readonly int Rings = CountRings();

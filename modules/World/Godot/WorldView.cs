@@ -7,10 +7,10 @@ namespace Neo.World;
 /// <summary>
 /// Godot side of the World module: builds the countryside you fly over once in
 /// <see cref="_Ready"/>: the ground mesh of the playable square from <see cref="Terrain.HeightAt"/>
-/// (hills, mountains, the river and lake, water painted by Ground.gdshader), the wall ring mesh
-/// around it (<see cref="WallMesh"/>: the wall mountains and the ranges behind, out to the haze)
-/// and the tree clumps. Draws only; no rules here. Four meshes, each drawn with a toon pass and an
-/// ink-outline pass.
+/// (hills, mountains, the river and lake, water painted by Ground.gdshader), the range's ring mesh
+/// around it (<see cref="WallMesh"/>: foothills, the main ridge and the rows of peaks behind, out to
+/// the haze), the tree clumps and the pine forests on the foothills. Draws only; no rules here. Five
+/// meshes, each drawn with a toon pass and an ink-outline pass.
 /// </summary>
 public partial class WorldView : Node3D, IModuleView
 {
@@ -18,6 +18,10 @@ public partial class WorldView : Node3D, IModuleView
     private const ulong Seed = 1917;
     /// <summary>Trees grow below this height (m): none on the mountain tops.</summary>
     private const float TreeLine = 110f;
+    /// <summary>Pines grow on the range below this height (m), thinning out toward it.</summary>
+    private const float PineLine = 950f;
+    /// <summary>Pine clumps tried on the range (fewer grow: high, steep or wet spots are skipped).</summary>
+    private const int PineClumps = 1400;
 
     // Tree clumps placed where the preview camera looks (x, z).
     private static readonly Vector2[] ViewClumps = { new(-75, 550), new(210, 475), new(-175, 350), new(-10, 300), new(-280, 625) };
@@ -32,6 +36,7 @@ public partial class WorldView : Node3D, IModuleView
         GetNode<MeshInstance3D>("Ground").Mesh = BuildGround();
         GetNode<MeshInstance3D>("Wall").Mesh = BuildWall();
         PlantTrees(GetNode<MultiMeshInstance3D>("RoundTrees"), GetNode<MultiMeshInstance3D>("Poplars"));
+        GetNode<MultiMeshInstance3D>("Pines").Multimesh = BuildMultiMesh(BuildPine(), PlantPines());
         // The preview camera frames the scene when it runs alone (screenshots, the editor);
         // in the game the shell loads it as a child and the player's camera is used.
         if (GetParent() != GetTree().Root)
@@ -87,7 +92,7 @@ public partial class WorldView : Node3D, IModuleView
         uv = new Vector2(depth > 0f ? -depth : h - Terrain.WaterLevel, 0f);
     }
 
-    /// <summary>The wall ring: <see cref="WallMesh.Rings"/> square rings of <see cref="WallMesh.Segments"/> vertices around the ground mesh.</summary>
+    /// <summary>The range's ring: <see cref="WallMesh.Rings"/> square rings of <see cref="WallMesh.Segments"/> vertices around the ground mesh.</summary>
     private static ArrayMesh BuildWall()
     {
         const int segments = WallMesh.Segments;
@@ -169,6 +174,52 @@ public partial class WorldView : Node3D, IModuleView
         return slope < 0.9f * 2f * r;
     }
 
+    /// <summary>Pine forests on the range's foothills: clumps beyond the edge (seeded, so the layout never changes),
+    /// dense low down and thinning out toward <see cref="PineLine"/>, none on water or steep rock.</summary>
+    private static System.Collections.Generic.List<(Transform3D, Color)> PlantPines()
+    {
+        var rng = new RandomNumberGenerator { Seed = Seed + 1 };
+        var pines = new System.Collections.Generic.List<(Transform3D, Color)>();
+        const float reach = HalfSize + 1700f;
+        for (int clump = 0; clump < PineClumps; clump++)
+        {
+            float cx = rng.RandfRange(-reach, reach), cz = rng.RandfRange(-reach, reach);
+            float beyond = Terrain.BeyondEdge(cx, cz);
+            if (beyond < 15f || beyond > 1700f)
+                continue;
+            int count = rng.RandiRange(6, 22);
+            float radius = rng.RandfRange(40f, 110f);
+            for (int t = 0; t < count; t++)
+            {
+                float angle = rng.RandfRange(0f, Mathf.Tau);
+                float r = radius * MathF.Sqrt(rng.Randf());
+                float x = cx + r * MathF.Cos(angle), z = cz + r * MathF.Sin(angle);
+                float h = Terrain.HeightAt(x, z);
+                // Thinning with height: fewer the higher, none from the pine line up.
+                float chance = 1f - h / PineLine;
+                if (Terrain.BeyondEdge(x, z) < 10f || rng.Randf() > chance * chance * 1.3f || !CanGrowPine(x, z))
+                    continue;
+                float scale = rng.RandfRange(0.8f, 1.4f) * (1f - 0.3f * h / PineLine);
+                var basis = new Basis(Vector3.Up, rng.RandfRange(0f, Mathf.Tau)).Scaled(new Vector3(scale, scale * rng.RandfRange(0.9f, 1.25f), scale));
+                var transform = new Transform3D(basis, new Vector3(x, h - 0.5f, z));
+                float shade = rng.RandfRange(0.82f, 1.1f);
+                pines.Add((transform, new Color(shade * rng.RandfRange(0.9f, 1.05f), shade, shade * rng.RandfRange(0.9f, 1.05f))));
+            }
+        }
+        return pines;
+    }
+
+    /// <summary>Pines grow on dry ground under the pine line, off steep slopes (under about 40 degrees).</summary>
+    private static bool CanGrowPine(float x, float z)
+    {
+        float h = Terrain.HeightAt(x, z);
+        if (h > PineLine || h < Terrain.PlainHeight || Terrain.IsWater(x, z))
+            return false;
+        const float r = 6f;
+        float gx = Terrain.HeightAt(x + r, z) - Terrain.HeightAt(x - r, z), gz = Terrain.HeightAt(x, z + r) - Terrain.HeightAt(x, z - r);
+        return gx * gx + gz * gz < 0.7f * (2f * r) * (2f * r);
+    }
+
     private static MultiMesh BuildMultiMesh(Mesh mesh, System.Collections.Generic.List<(Transform3D Transform, Color Tint)> trees)
     {
         var multi = new MultiMesh { TransformFormat = MultiMesh.TransformFormatEnum.Transform3D, UseColors = true, Mesh = mesh };
@@ -198,6 +249,39 @@ public partial class WorldView : Node3D, IModuleView
         AddBlob(st, new Vector3(0, 1.2f, 0), 0.4f, 1.2f, 6, 1, Bark);
         AddBlob(st, new Vector3(0, 7.5f, 0), 1.9f, 6.2f, 6, 5, new Color(0.22f, 0.52f, 0.22f));
         return End(st);
+    }
+
+    /// <summary>A low-poly pine: a short trunk under three stacked cones of needles, about 17 m tall.</summary>
+    private static Mesh BuildPine()
+    {
+        var st = Begin();
+        AddBlob(st, new Vector3(0, 1.5f, 0), 0.5f, 1.5f, 5, 1, Bark);
+        AddCone(st, 1.8f, 8.5f, 4.6f, new Color(0.16f, 0.42f, 0.24f));
+        AddCone(st, 6.0f, 12.8f, 3.6f, new Color(0.19f, 0.47f, 0.26f));
+        AddCone(st, 9.8f, 17f, 2.5f, new Color(0.22f, 0.53f, 0.28f));
+        return End(st);
+    }
+
+    /// <summary>A six-sided cone (open below) from height <paramref name="bottom"/> (radius <paramref name="radius"/>) up to a point at
+    /// <paramref name="top"/>, flat faces in <paramref name="color"/>; UV.y holds its middle height for the outline pass.</summary>
+    private static void AddCone(SurfaceTool st, float bottom, float top, float radius, Color color)
+    {
+        const int segments = 6;
+        var uv = new Vector2(0, 0.5f * (bottom + top));
+        var apex = new Vector3(0, top, 0);
+        for (int seg = 0; seg < segments; seg++)
+        {
+            float a0 = Mathf.Tau * seg / segments, a1 = Mathf.Tau * (seg + 1) / segments;
+            var p0 = new Vector3(radius * MathF.Cos(a0), bottom, radius * MathF.Sin(a0));
+            var p1 = new Vector3(radius * MathF.Cos(a1), bottom, radius * MathF.Sin(a1));
+            float v = 0.92f + 0.16f * ((seg * 7919) % 13) / 12f;
+            st.SetColor(new Color(color.R * v, color.G * v, color.B * v));
+            foreach (var p in new[] { p0, p1, apex })
+            {
+                st.SetUV(uv);
+                st.AddVertex(p);
+            }
+        }
     }
 
     private static SurfaceTool Begin()

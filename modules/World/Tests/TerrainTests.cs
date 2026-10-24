@@ -10,9 +10,9 @@ public class TerrainTests
     // Documented in README.md: the two inner mountains' tops (x, z, height).
     private static readonly (float X, float Z, float Height)[] Peaks = { (-620f, -120f, 200f), (600f, 200f, 162f) };
 
-    // Documented in README.md: the lake's center, and the tallest wall peak (north).
+    // Documented in README.md: the lake's center, and the range's tallest peak (north).
     private const float LakeX = -330f, LakeZ = -470f;
-    private const float TopX = 150f, TopZ = -1720f;
+    private const float TopX = 150f, TopZ = -3700f;
 
     /// <summary>Points every <paramref name="step"/> m around the square ring <paramref name="beyond"/> m outside the playable square's edge.</summary>
     private static System.Collections.Generic.IEnumerable<(float X, float Z)> Around(float beyond, float step)
@@ -27,20 +27,28 @@ public class TerrainTests
         }
     }
 
+    /// <summary>Like <see cref="Around"/>, but only straight out from the square's sides (not off its corners).</summary>
+    private static System.Collections.Generic.IEnumerable<(float X, float Z)> AroundSides(float beyond, float step)
+    {
+        foreach (var (x, z) in Around(beyond, step))
+            if (MathF.Min(MathF.Abs(x), MathF.Abs(z)) <= Half)
+                yield return (x, z);
+    }
+
     [Fact]
     public void HeightsStayWithinWaterLevelAndMaxHeightEverywhere()
     {
         float highest = float.MinValue;
-        for (float z = -Half - 6000f; z <= Half + 6000f; z += 13f)
-            for (float x = -Half - 6000f; x <= Half + 6000f; x += 13f)
+        for (float z = -Half - 7000f; z <= Half + 7000f; z += 13f)
+            for (float x = -Half - 7000f; x <= Half + 7000f; x += 13f)
             {
                 float h = Terrain.HeightAt(x, z);
                 Assert.True(h >= Terrain.WaterLevel && h <= Terrain.MaxHeight, $"{h} at ({x}, {z})");
                 highest = MathF.Max(highest, h);
             }
         Assert.True(highest > Terrain.MaxHeight - 30f, $"highest sample {highest}");
-        // MaxHeight is the top of the tallest wall peak, and nothing near it is higher.
-        Assert.Equal(2750f, Terrain.MaxHeight);
+        // MaxHeight is the top of the range's tallest peak, and nothing near it is higher.
+        Assert.Equal(2600f, Terrain.MaxHeight);
         Assert.Equal(Terrain.MaxHeight, Terrain.HeightAt(TopX, TopZ));
         for (float dz = -700f; dz <= 700f; dz += 3f)
             for (float dx = -700f; dx <= 700f; dx += 3f)
@@ -65,56 +73,216 @@ public class TerrainTests
     }
 
     [Fact]
-    public void WallMountainsRiseAllAroundJustBeyondTheEdge()
+    public void InsideThePlayableSquareTheLandIsUnchanged()
     {
-        // Just inside the edge the land is low; from WallReach beyond it (and on out to the
-        // horizon) the ground is at least WallMinHeight, far above where engines stop climbing.
-        Assert.Equal(1600f, Terrain.WallMinHeight);
-        Assert.True(Terrain.WallMinHeight > 1000f + 500f);
-        Assert.InRange(Terrain.WallReach, 100f, 400f);
+        // The same inner landscape as before the range was rebuilt (job 729's): its sum over a 4 m grid and a few points.
+        double sum = 0;
+        for (float z = -Half; z <= Half; z += 4f)
+            for (float x = -Half; x <= Half; x += 4f)
+                sum += Terrain.HeightAt(x, z);
+        Assert.Equal(4058018.09, sum, 0.5);
+        Assert.Equal(18.301382f, Terrain.HeightAt(Half, Half), 4);
+        Assert.Equal(31.789394f, Terrain.HeightAt(-Half, 317f), 4);
+    }
+
+    [Fact]
+    public void FoothillsStartLowAtTheEdgeAndTheRangeClimbsGradually()
+    {
+        // Just inside the edge and at it the land is low; the foothills rise from it (tens to a few hundred meters
+        // in the first few hundred meters), and the climb to the ridge takes kilometers, not a sheer face.
         foreach (var (x, z) in Around(-1f, 2f))
             Assert.True(Terrain.HeightAt(x, z) < 60f, $"{Terrain.HeightAt(x, z)} just inside at ({x}, {z})");
         foreach (var (x, z) in Around(0f, 2f))
             Assert.True(Terrain.HeightAt(x, z) < 60f, $"{Terrain.HeightAt(x, z)} at the edge ({x}, {z})");
-        foreach (float beyond in new[] { Terrain.WallReach, Terrain.WallReach + 1f, 400f, 600f, 1000f, 2000f, 4000f, 6000f, 20000f })
-            foreach (var (x, z) in Around(beyond, 3f))
-                Assert.True(Terrain.HeightAt(x, z) >= Terrain.WallMinHeight, $"{Terrain.HeightAt(x, z)} at ({x}, {z}), {beyond} m beyond the edge");
-        // Steep: it climbs from the low edge to the wall's height within WallReach, everywhere.
-        for (float beyond = Terrain.WallReach; beyond <= Terrain.WallReach + 200f; beyond += 10f)
-            foreach (var (x, z) in Around(beyond, 7f))
-                Assert.True(Terrain.HeightAt(x, z) >= Terrain.WallMinHeight);
-        Assert.Equal(Terrain.WallReach, Terrain.BeyondEdge(Half + Terrain.WallReach, 0f));
+        // (Distances straight out from the sides: off the corners the range is farther away.)
+        foreach (var (x, z) in AroundSides(50f, 4f))
+            Assert.True(Terrain.HeightAt(x, z) < 100f, $"{Terrain.HeightAt(x, z)} 50 m out at ({x}, {z})");
+        foreach (float beyond in new[] { 200f, 300f, 500f })
+        {
+            float sum = 0f;
+            int count = 0;
+            foreach (var (x, z) in AroundSides(beyond, 10f))
+            {
+                float h = Terrain.HeightAt(x, z);
+                Assert.True(h < 400f, $"{h} at ({x}, {z}), {beyond} m out: foothills, not mountains");
+                sum += h;
+                count++;
+            }
+            Assert.InRange(sum / count, 50f, 400f);
+        }
+        // Within 1 km of the edge no ground is beyond a plane's ceiling; the ridge is farther out.
+        for (float beyond = 0f; beyond <= 1000f; beyond += 50f)
+            foreach (var (x, z) in AroundSides(beyond, 10f))
+                Assert.True(Terrain.HeightAt(x, z) < 1100f, $"{Terrain.HeightAt(x, z)} at ({x}, {z}), {beyond} m out");
+        Assert.Equal(1000f, Terrain.BeyondEdge(Half + 1000f, 0f));
         Assert.Equal(-Half, Terrain.BeyondEdge(0f, 0f));
     }
 
     [Fact]
-    public void TheWallHasSnowyPeaksWellAboveItsCrest()
+    public void AContinuousRidgeClosesTheMapAllAround()
     {
-        // Looking out anywhere along the edge, peaks rise on and behind the crest: on most lines
-        // straight out, the ground somewhere 350..900 m beyond the edge tops 2100 m; the crest
-        // (WallReach out) is jagged, not a level rim; the ranges far out stay under the tallest top.
-        int lines = 0, peaked = 0;
-        foreach (var (x, z) in Around(0f, 25f))
+        // Engines fade out by about 1000-1100 m: every way out crosses ground at least WallMinHeight high within
+        // WallReach of the edge, saddles included. Rays out from the center in every direction, and straight out
+        // from every point of the edge; each meets such ground.
+        Assert.InRange(Terrain.WallMinHeight, 1350f, 1600f);
+        Assert.InRange(Terrain.WallReach, 1500f, 2500f);
+        int rays = 3600;
+        for (int i = 0; i < rays; i++)
         {
-            float ox = MathF.Abs(x) >= Half ? MathF.Sign(x) : 0f, oz = MathF.Abs(z) >= Half ? MathF.Sign(z) : 0f;
-            float highest = 0f;
-            for (float d = 350f; d <= 900f; d += 20f)
-                highest = MathF.Max(highest, Terrain.HeightAt(x + ox * d, z + oz * d));
-            lines++;
-            if (highest > 2100f)
-                peaked++;
+            float a = i * MathF.Tau / rays, dx = MathF.Cos(a), dz = MathF.Sin(a);
+            float start = Half / MathF.Max(MathF.Abs(dx), MathF.Abs(dz));
+            Assert.True(Crosses(0f, 0f, dx, dz, start), $"ray from the center at {a} rad gets out low");
         }
-        Assert.True(peaked > 0.6f * lines, $"peaks behind {peaked} of {lines} lines");
+        foreach (var (x, z) in Around(0f, 8f))
+        {
+            float dx = MathF.Abs(x) >= Half ? MathF.Sign(x) : 0f, dz = MathF.Abs(z) >= Half ? MathF.Sign(z) : 0f;
+            float length = MathF.Sqrt(dx * dx + dz * dz);
+            Assert.True(Crosses(x, z, dx / length, dz / length, 0f), $"straight out from ({x}, {z}) gets out low");
+        }
+        // Behind the ridge too the ground stays above where engines give out.
+        foreach (float beyond in new[] { Terrain.WallReach, 3000f, 4000f, 6000f, 9000f })
+            foreach (var (x, z) in Around(beyond, 9f))
+                Assert.True(Terrain.HeightAt(x, z) > 1100f, $"{Terrain.HeightAt(x, z)} at ({x}, {z}), {beyond} m out");
+    }
+
+    /// <summary>Whether the ray from (x, z) + <paramref name="start"/> x (dx, dz) outward meets ground at least WallMinHeight high
+    /// within WallReach of the edge (sampled every 4 m).</summary>
+    private static bool Crosses(float x, float z, float dx, float dz, float start)
+    {
+        for (float t = start; ; t += 4f)
+        {
+            float px = x + dx * t, pz = z + dz * t;
+            if (Terrain.BeyondEdge(px, pz) > Terrain.WallReach)
+                return false;
+            if (Terrain.HeightAt(px, pz) >= Terrain.WallMinHeight)
+                return true;
+        }
+    }
+
+    [Fact]
+    public void NoSlopeIsSteeperThanSixtyDegreesExceptNearSummits()
+    {
+        // Mountains, not a wall: below the snow (1400 m; the rocky summits are above it) no slope tops 60 degrees,
+        // nowhere tops 65, and most of the range is 45 degrees or gentler. Slopes over 2 m, every 11 m out to 3.5 km.
+        float tan60 = MathF.Tan(60f * MathF.PI / 180f), tan65 = MathF.Tan(65f * MathF.PI / 180f), tan45 = 1f;
+        int samples = 0, gentle = 0;
+        float worst = 0f;
+        string where = "";
+        for (float z = -Half - 3500f; z <= Half + 3500f; z += 11f)
+            for (float x = -Half - 3500f; x <= Half + 3500f; x += 11f)
+            {
+                if (Terrain.BeyondEdge(x, z) <= 0f)
+                    continue;
+                float h = Terrain.HeightAt(x, z);
+                float gx = (Terrain.HeightAt(x + 1f, z) - Terrain.HeightAt(x - 1f, z)) / 2f;
+                float gz = (Terrain.HeightAt(x, z + 1f) - Terrain.HeightAt(x, z - 1f)) / 2f;
+                float slope = MathF.Sqrt(gx * gx + gz * gz);
+                Assert.True(slope < tan65, $"slope {slope} at ({x}, {z}), {h} m");
+                if (h < 1400f && slope > worst)
+                    (worst, where) = (slope, $"({x}, {z}), {h} m");
+                samples++;
+                if (slope <= tan45)
+                    gentle++;
+            }
+        Assert.True(worst < tan60, $"slope {MathF.Atan(worst) * 180f / MathF.PI} degrees at {where}");
+        Assert.True(gentle > 0.75f * samples, $"{gentle} of {samples} at 45 degrees or gentler");
+    }
+
+    [Fact]
+    public void PeaksStandInRowsBehindEachOtherWithValleysAndSaddlesBetween()
+    {
+        // Tops (highest within 150 m around) on a 50 m grid out to 5 km: many, of different heights, in several rows.
+        int near = 0, middle = 0, far = 0;
+        float lowest = float.MaxValue, highest = 0f;
+        for (float z = -Half - 5000f; z <= Half + 5000f; z += 50f)
+            for (float x = -Half - 5000f; x <= Half + 5000f; x += 50f)
+            {
+                float beyond = Terrain.BeyondEdge(x, z), h = Terrain.HeightAt(x, z);
+                if (beyond < 1000f || h < 1500f)
+                    continue;
+                bool top = true;
+                for (float dz = -150f; dz <= 150f && top; dz += 50f)
+                    for (float dx = -150f; dx <= 150f && top; dx += 50f)
+                        top = (dx == 0f && dz == 0f) || Terrain.HeightAt(x + dx, z + dz) < h;
+                if (!top)
+                    continue;
+                lowest = MathF.Min(lowest, h);
+                highest = MathF.Max(highest, h);
+                if (beyond < 2600f)
+                    near++;
+                else if (beyond < 3800f)
+                    middle++;
+                else
+                    far++;
+            }
+        Assert.True(near >= 8 && middle >= 8 && far >= 8, $"tops {near} near, {middle} middle, {far} far");
+        Assert.True(lowest < 1900f && highest > 2300f, $"tops {lowest}..{highest} m");
+        // Along the range the main ridge is not level: saddles hundreds of meters under the peaks beside them.
         float crestLow = float.MaxValue, crestHigh = 0f;
         foreach (var (x, z) in Around(Terrain.WallReach, 25f))
         {
             crestLow = MathF.Min(crestLow, Terrain.HeightAt(x, z));
             crestHigh = MathF.Max(crestHigh, Terrain.HeightAt(x, z));
         }
-        Assert.True(crestHigh - crestLow > 400f, $"crest {crestLow}..{crestHigh} m");
+        Assert.True(crestHigh - crestLow > 500f, $"along the ridge {crestLow}..{crestHigh} m");
         foreach (var (x, z) in Around(5000f, 50f))
             Assert.True(Terrain.HeightAt(x, z) < Terrain.MaxHeight - 100f, "far ranges stay under the tallest top");
     }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void ValleysCloseInAndRiseTowardTheRidge(int side)
+    {
+        // Follow the deepest valley of each side (its lowest ground 600 m out, then the lowest within 250 m of it each
+        // 200 m farther): its floor rises steadily, its sides rise 40 m within a few hundred meters on both hands, and it
+        // narrows (the ground 40 m above its floor closer in) toward the ridge.
+        float at = 0f, floor = float.MaxValue;
+        for (float t = -700f; t <= 700f; t += 5f)
+        {
+            float h = Terrain.HeightAt(SidePoint(side, t, 600f).X, SidePoint(side, t, 600f).Z);
+            if (h < floor)
+                (floor, at) = (h, t);
+        }
+        float lastFloor = -1f, firstWidth = 0f, lastWidth = 0f;
+        for (float beyond = 600f; beyond <= 1400f; beyond += 200f)
+        {
+            float center = at;
+            floor = float.MaxValue;
+            for (float t = center - 250f; t <= center + 250f; t += 5f)
+            {
+                var (x, z) = SidePoint(side, t, beyond);
+                if (Terrain.HeightAt(x, z) < floor)
+                    (floor, at) = (Terrain.HeightAt(x, z), t);
+            }
+            float width = 0f;
+            foreach (float hand in new[] { -1f, 1f })
+            {
+                float d = 0f;
+                while (d < 400f && Terrain.HeightAt(SidePoint(side, at + hand * d, beyond).X, SidePoint(side, at + hand * d, beyond).Z) < floor + 40f)
+                    d += 5f;
+                Assert.True(d < 400f, $"valley at {at} m, {beyond} m out ({floor} m) open on one hand");
+                width += d;
+            }
+            Assert.True(floor > lastFloor + 50f, $"valley floor {floor} m at {beyond} m out, {lastFloor} m 200 m before");
+            lastFloor = floor;
+            if (firstWidth == 0f)
+                firstWidth = width;
+            lastWidth = width;
+        }
+        Assert.True(lastWidth < 0.85f * firstWidth, $"valley {firstWidth} m wide 600 m out, {lastWidth} m 1400 m out");
+    }
+
+    /// <summary>The point <paramref name="t"/> m along side <paramref name="side"/> (north, east, south, west), <paramref name="beyond"/> m out.</summary>
+    private static (float X, float Z) SidePoint(int side, float t, float beyond) => side switch
+    {
+        0 => (t, -Half - beyond),
+        1 => (Half + beyond, t),
+        2 => (t, Half + beyond),
+        _ => (-Half - beyond, t),
+    };
 
     [Fact]
     public void MountainsStandWhereDocumentedWithTheirTopsHighest()
@@ -234,7 +402,7 @@ public class TerrainTests
     [Fact]
     public void SameAnswerEveryCallWithoutAllocating()
     {
-        // From beyond the north-west wall across the map to beyond the south-east one.
+        // From the north-west foothills across the map to the south-east ones.
         var first = new float[3000];
         for (int i = 0; i < first.Length; i++)
             first[i] = Terrain.HeightAt(-1.5f * Half + i * 1.003f, -1.5f * Half + i * 1.01f);
@@ -250,7 +418,7 @@ public class TerrainTests
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.Equal(0, differing);
         Assert.Equal(0, allocated);
-        Assert.Equal(2004.52f, Terrain.HeightAt(1300f, 40f), 1); // the same terrain on every machine and run
+        Assert.Equal(194.31f, Terrain.HeightAt(1300f, 40f), 1); // the same terrain on every machine and run
     }
 
     /// <summary>
@@ -291,11 +459,10 @@ public class TerrainTests
     private static readonly (float U, float V)[] Spots = { (0.5f, 0.5f), (0.25f, 0.25f), (0.75f, 0.75f), (0.33f, 0.6f), (0.7f, 0.2f) };
 
     /// <summary>
-    /// The wall ring mesh (WallMesh): ring 0 is the ground mesh's border, vertex for vertex; between
-    /// vertices, out to NearReach (the face and the crest), up to 1300 m (above any plane: engines stop
-    /// climbing at about 1000 m) the drawn wall is within 5 m plus 2.5 % of the height of HeightAt: on the
-    /// steep face a few meters up or down are under a meter sideways, so a crash into it shows where it
-    /// looks. Higher up (scenery: crest and peaks) within 8 %.
+    /// The range's ring mesh (WallMesh): ring 0 is the ground mesh's border, vertex for vertex; between
+    /// vertices, out past the main ridge (WallReach), up to 1300 m (above any plane: engines stop climbing
+    /// at about 1000 m) the drawn range is within 5 m plus 2.5 % of the height of HeightAt, so a crash into
+    /// a slope shows where it looks. Higher up (scenery: crest and peaks) within 8 %.
     /// </summary>
     [Fact]
     public void WallRingMeshJoinsTheGroundAndFollowsHeightAt()
@@ -314,7 +481,7 @@ public class TerrainTests
         }
         float worst = 0f;
         string where = "";
-        for (int r = 0; WallMesh.Offset(r + 1) <= WallMesh.NearReach; r++)
+        for (int r = 0; WallMesh.Offset(r) <= Terrain.WallReach + 200f; r++)
             for (int s = 0; s < WallMesh.Segments; s++)
             {
                 int s1 = (s + 1) % WallMesh.Segments;
@@ -339,6 +506,6 @@ public class TerrainTests
                         (worst, where) = (share, $"({x}, {z}): {drawn} m drawn, {exact} m exact");
                 }
             }
-        Assert.True(worst < 1f, $"wall mesh too far from HeightAt at {where}");
+        Assert.True(worst < 1f, $"range mesh too far from HeightAt at {where}");
     }
 }
