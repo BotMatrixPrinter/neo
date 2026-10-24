@@ -41,7 +41,10 @@ while its plane's boost runs (`Bullet.Boosted`, `Boosted(plane)`); bullets alrea
 at the pop stay unboosted, boosted ones stay boosted after the boost ends. A boosted bullet's
 `PlaneHit` amount is 1.5x (`BoostFactor`: 0.06). Its balloon damage is 1 x 1.5 rounded down
 with the 0.5 left over carried to that plane's next boosted balloon hit, so its boosted hits
-go 1, 2, 1, 2 (exactly 1.5 on average, never below 1).
+go 1, 2, 1, 2 (exactly 1.5 on average, never below 1). While a plane is boosted its guns also
+heat up 25% more slowly while firing (`BoostHeatFactor` 0.75: 3/16 per second, overheated
+after about 5.3 s of continuous fire instead of 4 s); cooling, the overheat threshold and the
+0.3 recovery are the same as unboosted.
 
 Heat rises 1/4 per second while firing (overheated at 1, after 4 s of continuous fire) and
 falls 1/2 per second otherwise (2 s from full). Overheated guns stop, trigger held or not,
@@ -76,7 +79,8 @@ trigger and heat, `PlaneHit` with the right part (engine, wings, tail, in the pl
 for hits on enemy planes from either team, no friendly fire, downed planes neither firing nor
 hit, a balloon in front of a plane taking the bullet, the balloon-pop boost (only the popping
 plane, `GunState.BoostSecondsLeft`, exactly 60 s, restarted by a new pop and not stacking,
-0.06 `PlaneHit`s, boosted balloon hits 1, 2, 1, 2), no allocations with all 8 planes firing
+0.06 `PlaneHit`s, boosted balloon hits 1, 2, 1, 2, boosted heat rising at 0.75x next to an
+unboosted plane at 1x and overheating at about 5.3 s, boosted cooling and recovery unchanged), no allocations with all 8 planes firing
 (half of them boosted until mid-run) and the pool reused.
 
 Test it alone: `./test.sh Guns`.

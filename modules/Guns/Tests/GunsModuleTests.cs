@@ -620,6 +620,73 @@ public class GunsModuleTests
         Assert.False(guns.State.Overheated);
     }
 
+    // Plane 0 boosted, plane 1 (same trigger, same team) not; both start firing cold.
+    private static (GunsModule guns, FakeBus bus) BoostedAndUnboostedFiring()
+    {
+        var (guns, bus) = Started(fire: false);
+        bus.Send(new PlaneState(1, Start + new Vector3(30f, 0f, 0f), Quaternion.Identity, PlaneVelocity, 50f, 1f));
+        Pop(bus, 0);
+        Trigger(bus, true);
+        bus.Send(new ControlInput(1, 0, 0, 0, 1f, true, false, Vector3.Zero));
+        return (guns, bus);
+    }
+
+    [Fact]
+    public void BoostedGunsHeatAtThreeQuartersTheRateAndOverheatAfterAboutFiveAndAThirdSeconds()
+    {
+        Assert.Equal(0.75, GunsModule.BoostHeatFactor);
+        var (guns, bus) = BoostedAndUnboostedFiring();
+        Ticks(guns, 120); // 2 s of fire
+        Assert.True(guns.Boosted(0));
+        Assert.False(guns.Boosted(1));
+        Assert.InRange(guns.StateOf(1).Heat, 0.5f - 1e-3f, 0.5f + 1e-3f); // unboosted: 1/4 per second
+        Assert.InRange(guns.StateOf(0).Heat, 0.375f - 1e-3f, 0.375f + 1e-3f); // boosted: 3/16 per second
+        Assert.InRange(guns.StateOf(0).Heat / guns.StateOf(1).Heat, 0.75f - 1e-3f, 0.75f + 1e-3f);
+
+        Ticks(guns, 132); // 4.2 s
+        Assert.True(guns.StateOf(1).Overheated);
+        Assert.False(guns.StateOf(0).Overheated);
+        Assert.True(guns.StateOf(0).Firing);
+
+        Ticks(guns, 60); // 5.2 s
+        Assert.False(guns.StateOf(0).Overheated);
+        Assert.True(guns.StateOf(0).Firing);
+        Ticks(guns, 15); // 5.45 s
+        Assert.True(guns.StateOf(0).Overheated); // full at 4 / 0.75 = 5.33 s
+        Assert.False(guns.StateOf(0).Firing);
+        Assert.InRange(guns.StateOf(0).ShotsFired, 104, 110); // 2 x 10/s for about 5.33 s
+    }
+
+    [Fact]
+    public void BoostedGunsCoolAndRecoverAsFastAsUnboostedOnes()
+    {
+        var (guns, bus) = BoostedAndUnboostedFiring();
+        while (!guns.StateOf(0).Overheated)
+            guns.Tick(in OneStep);
+        Assert.True(guns.Boosted(0));
+        Assert.Equal(1f, guns.StateOf(0).Heat); // the same threshold
+        Assert.True(guns.StateOf(1).Overheated); // unboosted plane 1 got there first
+
+        // Overheated, trigger still held: it cools at 1/2 per second, as unboosted guns do.
+        int stopped = 0;
+        while (guns.StateOf(0).Overheated && stopped < 600)
+        {
+            Assert.True(guns.StateOf(0).Heat >= 0.3f - 1e-4f);
+            float before = guns.StateOf(0).Heat;
+            guns.Tick(in OneStep);
+            Assert.Equal(Dt / 2f, before - guns.StateOf(0).Heat, 1e-5f);
+            stopped++;
+        }
+        Assert.InRange(stopped / 60.0, 1.35, 1.45); // 0.7 / 0.5 = 1.4 s, as unboosted
+        Assert.True(guns.StateOf(0).Heat < 0.3f);
+
+        Trigger(bus, false);
+        float heat = guns.StateOf(0).Heat;
+        Ticks(guns, 30);
+        Assert.True(guns.Boosted(0));
+        Assert.InRange(heat - guns.StateOf(0).Heat, 0.25f - 1e-3f, 0.25f + 1e-3f); // 1/2 per second
+    }
+
     [Fact]
     public void TickBeforeStartDoesNotThrow()
     {

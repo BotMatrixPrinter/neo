@@ -18,7 +18,7 @@ namespace Neo.Guns;
 /// (<see cref="PlaneRadius"/>) is removed and publishes one <see cref="PlaneHit"/> for the part
 /// hit. A plane that pops a balloon (<see cref="TargetDestroyed.ShooterPlaneId"/>) is boosted
 /// for <see cref="BoostSeconds"/>: the bullets it fires meanwhile do <see cref="BoostFactor"/>x
-/// damage. Publishes a <see cref="GunState"/> per plane every tick. Bullets live in a fixed pool;
+/// damage and its guns heat up at <see cref="BoostHeatFactor"/>x the rate. Publishes a <see cref="GunState"/> per plane every tick. Bullets live in a fixed pool;
 /// allocation-free per tick.
 /// </summary>
 public sealed class GunsModule : IModule
@@ -62,6 +62,13 @@ public sealed class GunsModule : IModule
 
     /// <summary>Damage multiplier of a boosted plane's bullets (+50%).</summary>
     public const float BoostFactor = 1.5f;
+
+    /// <summary>
+    /// Heat-up rate of a boosted plane's guns while firing, times the normal rate (25% slower:
+    /// about 5.3 s of continuous fire to overheat instead of <see cref="HeatUpSeconds"/>).
+    /// Cooling, the overheat threshold and <see cref="ResumeHeat"/> are unchanged.
+    /// </summary>
+    public const double BoostHeatFactor = 0.75;
 
     /// <summary>Body-space |x| beyond which a hit is on a wing, meters.</summary>
     public const float WingX = 1f;
@@ -213,7 +220,8 @@ public sealed class GunsModule : IModule
                 _lastVolley[p] = tick;
             }
             _shotTimer[p] -= dt;
-            _heat[p] = Math.Min(1.0, _heat[p] + dt / HeatUpSeconds);
+            double rise = dt / HeatUpSeconds * (boosted ? BoostHeatFactor : 1.0);
+            _heat[p] = Math.Min(1.0, _heat[p] + rise);
             if (_heat[p] >= 1.0 - Epsilon)
             {
                 _heat[p] = 1.0;
