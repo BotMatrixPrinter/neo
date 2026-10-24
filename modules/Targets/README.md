@@ -59,7 +59,7 @@ the edge, at least 0.4 x `HalfSize` apart, two balloons on each side and one at 
 anchored at `Terrain.HeightAt` under each balloon, no balloon over water (every water spot found by
 sampling the area moves to dry ground inside it; a spot outside the area is brought in), at least
 150 m above the terrain (the highest dry ground, found by sampling `Terrain.HeightAt`, raises a
-balloon wanted too low), no allocations. Every test position is a fraction of
+balloon wanted too low). Every test position is a fraction of
 `WorldBounds.HalfSize` or found by sampling the terrain, so the tests hold for any map size.
 
 Test it alone: `./test.sh Targets`.

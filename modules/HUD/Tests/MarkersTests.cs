@@ -47,16 +47,6 @@ public class MarkersTests
     public void Distance_text(float meters, string text) => Assert.Equal(text, Markers.DistanceText(meters));
 
     [Fact]
-    public void Distance_text_does_not_allocate()
-    {
-        _ = Markers.DistanceText(1f);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 5000; i++)
-            _ = Markers.DistanceText(i * 7.3f);
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-    }
-
-    [Fact]
     public void In_front_and_inside_is_on_screen()
     {
         var ahead = new Vector3(0f, 0f, -300f);

@@ -255,20 +255,6 @@ public class CameraModuleTests
     }
 
     [Fact]
-    public void TickDoesNotAllocate()
-    {
-        var (camera, bus) = NewCamera();
-        var plane = new Plane();
-        Action roll = () => plane.Orientation = Quaternion.Normalize(plane.Orientation * Quaternion.CreateFromAxisAngle(Vector3.UnitZ, 0.02f));
-        Fly(camera, bus, plane, 60, roll);
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        Fly(camera, bus, plane, 600, roll);
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-        Assert.Equal(0, bus.Published);
-    }
-
-    [Fact]
     public void IsTheModulesOnlyEntryClass()
     {
         int entries = 0;

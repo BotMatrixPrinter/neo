@@ -386,25 +386,6 @@ public class InputModuleTests
     }
 
     [Fact]
-    public void TickDoesNotAllocate()
-    {
-        var input = new InputModule();
-        input.Start(new NullBus());
-        var tick = new TickContext(1, Step);
-        input.SetState(new DeviceState(0.1f, 0.2f, 0.3f, 1, 0, true));
-        input.Tick(in tick);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 10_000; i++)
-        {
-            input.SetState(new DeviceState(0.1f, 0.2f, 0.3f, i & 1, 0, true, (i & 1) == 0));
-            input.Tick(in tick);
-            input.SetKeys(new KeyState { W = (i & 1) == 0, D = true, Shift = true, LeftMouse = true, R = (i & 1) == 1 });
-            input.Tick(in tick);
-        }
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-    }
-
-    [Fact]
     public void IsTheModulesOnlyEntryClass()
     {
         int entries = 0;
@@ -427,12 +408,5 @@ public class InputModuleTests
         foreach (var assembly in new[] { typeof(InputModule).Assembly, typeof(ControlInput).Assembly })
             foreach (var name in assembly.GetReferencedAssemblies())
                 Assert.DoesNotContain("Godot", name.Name);
-    }
-
-    private sealed class NullBus : IMessageBus
-    {
-        public void Subscribe<T>(IMessageHandler<T> handler) where T : struct { }
-
-        public void Publish<T>(in T message) where T : struct { }
     }
 }

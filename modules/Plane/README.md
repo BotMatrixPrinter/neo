@@ -119,8 +119,8 @@ ids apart (ids in first-seen order), ignores ids out of range, keeps each plane'
 a downed plane falls, crashes once on the ground, stays down until Flight respawns it and
 then does not slide from the wreck, Flight alone can down a plane, a crash on a hill explodes
 on its slope (far above GroundY) and stays there, a crash on the river splashes on its surface
-and the next on land explodes, publishes nothing, no
-allocations, one entry class. `PlaneLookTests`: team picks the model, no damage looks at or
+and the next on land explodes, publishes nothing, one
+entry class. `PlaneLookTests`: team picks the model, no damage looks at or
 above half health, engine smoke below half and thicker when worse, wing holes and a little
 smoke below half, flying/falling/crashed on flat ground (the plain, above GroundY), crashed on
 a hill's slope not inside it, a splash on water (at its surface), both .glb models have their body, `Propeller`,

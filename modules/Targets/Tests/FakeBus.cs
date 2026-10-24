@@ -36,25 +36,3 @@ internal sealed class FakeBus : IMessageBus
 
     public void Clear() => Published.Clear();
 }
-
-/// <summary>A bus that keeps only the <see cref="DamageTarget"/> handler and records nothing (no allocations).</summary>
-internal sealed class QuietBus : IMessageBus
-{
-    public IMessageHandler<DamageTarget>? Damage;
-    public int StatesPublished;
-    public int Destroyed;
-
-    public void Subscribe<T>(IMessageHandler<T> handler) where T : struct
-    {
-        if (handler is IMessageHandler<DamageTarget> damage)
-            Damage = damage;
-    }
-
-    public void Publish<T>(in T message) where T : struct
-    {
-        if (typeof(T) == typeof(TargetState))
-            StatesPublished++;
-        else if (typeof(T) == typeof(TargetDestroyed))
-            Destroyed++;
-    }
-}

@@ -198,7 +198,6 @@ collision course (head-on, 45 and 90 degrees from the right, 90 from the left, a
 90 right and 60 left) dodges it, misses and attacks its target again; with the player
 head-on 12 m above, high up it pushes under, low (100 m over the highest ground on its path)
 it never dodges down (nose never 3 degrees below level, stays 90 m above the ground) and
-misses; no dodge for a plane passing 40 m wide or a wingman 20 m alongside; the host can create the module (parameterless constructor); no allocations
-per tick.
+misses; no dodge for a plane passing 40 m wide or a wingman 20 m alongside; the host can create the module (parameterless constructor).
 
 Test it alone: `./test.sh Bots`.

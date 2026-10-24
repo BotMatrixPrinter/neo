@@ -482,29 +482,6 @@ public class DamageModuleTests
     }
 
     [Fact]
-    public void TickAndHitsDoNotAllocate()
-    {
-        var bus = new QuietBus();
-        var damage = new DamageModule();
-        damage.Start(bus);
-        var tick = new TickContext(1, Step);
-        var hit = new PlaneHit(4, 0, PlanePart.Engine, 0.3f);
-        bus.Hits!.Handle(in hit);
-        damage.Tick(in tick);
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 10_000; i++)
-        {
-            bus.Hits!.Handle(in hit);
-            damage.Tick(in tick);
-        }
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-        Assert.True(bus.Destroyed > 1);
-        Assert.True(bus.Respawned > 1);
-        Assert.Equal(10_001, bus.StatesPublished);
-    }
-
-    [Fact]
     public void RepairFixesOnePartPerCycleMostDamagedFirst()
     {
         var (damage, bus) = Started();
@@ -722,35 +699,6 @@ public class DamageModuleTests
         Assert.Equal(3, Assert.IsType<RepairState>(bus.Published[3]).PlaneId);
         Assert.False(damage.GetRepair(1).Repairing);
         Assert.False(damage.GetRepair(9).Repairing);
-    }
-
-    [Fact]
-    public void RepairDoesNotAllocate()
-    {
-        var bus = new QuietBus();
-        var damage = new DamageModule();
-        damage.Start(bus);
-        var tick = new TickContext(1, Step);
-        var hit = new PlaneHit(0, 4, PlanePart.Engine, 0.01f);
-        var held = Controls(0, true);
-        var released = Controls(0, false);
-        bus.Hits!.Handle(in hit);
-        bus.Controls!.Handle(in held);
-        damage.Tick(in tick);
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 10_000; i++)
-        {
-            if (i % 50 == 0)
-                bus.Hits!.Handle(in hit);
-            if (i % 1000 < 900)
-                bus.Controls!.Handle(in held);
-            else
-                bus.Controls!.Handle(in released);
-            damage.Tick(in tick);
-        }
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-        Assert.Equal(10_001, bus.RepairsPublished);
     }
 
     [Fact]

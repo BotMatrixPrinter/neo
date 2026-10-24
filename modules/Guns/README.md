@@ -80,7 +80,7 @@ for hits on enemy planes from either team, no friendly fire, downed planes neith
 hit, a balloon in front of a plane taking the bullet, the balloon-pop boost (only the popping
 plane, `GunState.BoostSecondsLeft`, exactly 60 s, restarted by a new pop and not stacking,
 0.06 `PlaneHit`s, boosted balloon hits 1, 2, 1, 2, boosted heat rising at 0.75x next to an
-unboosted plane at 1x and overheating at about 5.3 s, boosted cooling and recovery unchanged), no allocations with all 8 planes firing
-(half of them boosted until mid-run) and the pool reused.
+unboosted plane at 1x and overheating at about 5.3 s, boosted cooling and recovery unchanged), the pool reused with all 8 planes firing
+(half of them boosted until mid-run).
 
 Test it alone: `./test.sh Guns`.

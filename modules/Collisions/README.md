@@ -74,6 +74,6 @@ and pitch; the faster plane deals more than it takes (tail chase, head-on); dama
 than closing speed (10 m/s small, 60 m/s about half, 100 m/s and up a whole part); one hit per
 contact until separated; parts from the contact point in each plane's frame; downed planes
 ignored; allies collide; apart planes and unknown ids do nothing; three planes in one spot;
-determinism; no allocations; one entry class, no Godot in Core.
+determinism; one entry class, no Godot in Core.
 
 Test it alone: `./test.sh Collisions`.

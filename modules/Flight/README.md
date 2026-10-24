@@ -165,7 +165,7 @@ spawn frame; the rig moves plane 0 back along its line to the center for room, a
 the center (`Orbit`, 0.4 x HalfSize) instead of flying straight into the border. Spawns (every plane,
 200 respawns each: on its own half, inside the area, 350..450 m and 150 m clear of the terrain, level,
 heading toward the center within 30 degrees, different each respawn, spread over depth, width, height
-and heading, a team's planes at least 100 m apart, deterministic and untouched by `System.Random`; the
+and heading, a team's planes at least 100 m apart, deterministic; the
 module starts every plane there at full speed), speeds stay in 25..85 (cruise, max, min, dives, climbs,
 random flying, respawning after any crash), height (the power curve is full at the ground, smooth, 0 climb power and
 about 40 m/s level at 1000 m, a loss above, no ceiling constant left; low altitude unchanged;
@@ -187,8 +187,7 @@ at a mountain crashes on the slope at its height; flying at 9 m over the plain, 
 its height with no pull-up and no crash; respawn after a crash flies again and can crash again),
 the border (aimed straight out each way, no turn-back inside the map nor within 100 m past its edge;
 then either the wall mountains stop it with a crash beyond the edge, or the guard turns it back
-before the hard clamp; a diagonal aim never gets past the clamp), determinism (with damage, downing and respawn), no allocations per
-tick; all eight planes are published every tick in id order, four planes fly
+before the hard clamp; a diagonal aim never gets past the clamp), determinism (with damage, downing and respawn); all eight planes are published every tick in id order, four planes fly
 from their own inputs (others with no input), the `Teams` helper, `PlaneState.Alive` with the
 old constructor, engine damage (lower level speed, slows down gradually to it, climbs and
 dives slower), wing damage (with no input it rolls on toward the damaged wing, faster the worse, a healthy plane stays level), tail damage, falling to the ground (one `PlaneCrashed`, at the terrain height) and
@@ -200,8 +199,7 @@ change, pass each other without touching again and fly on; a sideways shove move
 once and its knock fades smoothly, gone within 2 s, then it flies on straight; speed along the
 nose changes within 25..85 and settles back; a roll kick either way rolls it smoothly and the
 bank then stays; sticks act on top of a kick; a pitch kick's climb stays; knocked into the
-ground it crashes once; knocked far out it stops at the hard clamp; downed planes, unknown ids and NaN ignored; deterministic and allocation-free with
-impulses). The fake bus delivers each message once per subscription to its type, like the shell's, and
+ground it crashes once; knocked far out it stops at the hard clamp; downed planes, unknown ids and NaN ignored). The fake bus delivers each message once per subscription to its type, like the shell's, and
 records the `PlaneCrashed` messages (also per plane: on a walled map, planes left with no input crash into the walls).
 
 Test it alone: `./test.sh Flight`. No Godot view: the Plane module draws the plane.

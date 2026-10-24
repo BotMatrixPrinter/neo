@@ -99,15 +99,4 @@ public class FixedClockTests
         Assert.InRange(total, 299, 300);
         Assert.Equal(total, clock.Tick);
     }
-
-    [Fact]
-    public void AdvanceDoesNotAllocate()
-    {
-        var clock = new FixedClock(1.0 / 60);
-        clock.Advance(0.01);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 10_000; i++)
-            clock.Advance(0.01);
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-    }
 }

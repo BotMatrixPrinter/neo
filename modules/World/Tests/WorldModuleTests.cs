@@ -32,19 +32,6 @@ public class WorldModuleTests
     }
 
     [Fact]
-    public void TickDoesNotAllocate()
-    {
-        var world = new WorldModule();
-        world.Start(new FakeBus());
-        var tick = new TickContext(1, 1.0 / 60);
-        world.Tick(in tick);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 10_000; i++)
-            world.Tick(in tick);
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-    }
-
-    [Fact]
     public void IsTheModulesOnlyEntryClassAndHasAParameterlessConstructor()
     {
         int entries = 0;

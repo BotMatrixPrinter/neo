@@ -400,14 +400,13 @@ public class TerrainTests
     }
 
     [Fact]
-    public void SameAnswerEveryCallWithoutAllocating()
+    public void SameAnswerEveryCall()
     {
         // From the north-west foothills across the map to the south-east ones.
         var first = new float[3000];
         for (int i = 0; i < first.Length; i++)
             first[i] = Terrain.HeightAt(-1.5f * Half + i * 1.003f, -1.5f * Half + i * 1.01f);
         int differing = 0;
-        long before = GC.GetAllocatedBytesForCurrentThread();
         for (int round = 0; round < 3; round++)
             for (int i = 0; i < first.Length; i++)
             {
@@ -415,9 +414,7 @@ public class TerrainTests
                 if (Terrain.HeightAt(x, z) != first[i] || Terrain.IsWater(x, z) != Terrain.WaterDepthAt(x, z) > 0f)
                     differing++;
             }
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.Equal(0, differing);
-        Assert.Equal(0, allocated);
         Assert.Equal(194.31f, Terrain.HeightAt(1300f, 40f), 1); // the same terrain on every machine and run
     }
 

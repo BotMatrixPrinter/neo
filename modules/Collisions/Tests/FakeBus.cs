@@ -34,25 +34,3 @@ internal sealed class FakeBus : IMessageBus
 
     public void Clear() => Published.Clear();
 }
-
-/// <summary>A bus that keeps the plane handler and only counts what is published (no allocations).</summary>
-internal sealed class QuietBus : IMessageBus
-{
-    public IMessageHandler<PlaneState>? Plane;
-    public int Hits;
-    public int Impulses;
-
-    public void Subscribe<T>(IMessageHandler<T> handler) where T : struct
-    {
-        if (handler is IMessageHandler<PlaneState> plane)
-            Plane = plane;
-    }
-
-    public void Publish<T>(in T message) where T : struct
-    {
-        if (typeof(T) == typeof(PlaneHit))
-            Hits++;
-        else if (typeof(T) == typeof(CollisionImpulse))
-            Impulses++;
-    }
-}

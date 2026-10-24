@@ -146,7 +146,7 @@ the boost badge (countdown texts, a whole 60 s boost tick by tick, the pulse in 
 the shot-down countdown to the respawn, markers only for other alive planes and their interpolated
 positions (no sweep on a respawn), repair (part texts, progress, "N more", the hint only while
 damaged and not repairing or down, "Repair cancelled" for 1.5 s only on a mid-cycle release and
-cleared by a new repair, not on finishing or going down, other planes ignored), publishes nothing, no allocations.
+cleared by a new repair, not on finishing or going down, other planes ignored), publishes nothing.
 
 `MarkersTests`: team colors and shapes, distance texts, on/off screen (outside the view, behind
 the camera), the edge direction and angle in front and behind, the 40% circle.

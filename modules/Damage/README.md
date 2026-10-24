@@ -57,7 +57,7 @@ from then on its `PlaneDamageState` and `RepairState` are published every tick. 
 
 ## Tests
 
-`Tests/DamageModuleTests.cs`, with a fake bus (`FakeBus`, `QuietBus`): hits lower only the
+`Tests/DamageModuleTests.cs`, with a fake bus (`FakeBus`): hits lower only the
 right part, published states carry each part, 25 bullets down a plane exactly once, no
 damage while down, respawn after exactly 5 s at full health (once) and downing again,
 kills per shooter (no self kill), crashes (destroy at once, also an unknown plane; credit to
@@ -66,8 +66,8 @@ before a respawn not credited, no second destroy for a downed plane, respawn 5 s
 crash and crashing again), repair (one part per 4 s cycle, most damaged first,
 several parts take longer, release loses the current cycle and re-holding restarts it from 0,
 no ControlInput counts as released, steering does not cancel, downed cancels, no repair when
-undamaged, hits during a repair, per plane, `RepairState` order, no allocations), states published every tick for every plane known from
-`PlaneState` or a hit (all 8 planes), bad hits ignored, determinism, no allocations, Core
+undamaged, hits during a repair, per plane, `RepairState` order), states published every tick for every plane known from
+`PlaneState` or a hit (all 8 planes), bad hits ignored, determinism, Core
 targets net10.0 without Godot.
 
 Test it alone: `./test.sh Damage`.

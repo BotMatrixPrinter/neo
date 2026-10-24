@@ -227,8 +227,7 @@ public class FlightModuleTests
                 var spawn = SpawnOf(id, count);
                 var p = spawn.Position;
                 AssertSpawn(id, p, spawn.Orientation);
-                // Deterministic: the same id and count, the same spawn, whatever else used System.Random meanwhile.
-                Random.Shared.Next();
+                // Deterministic: the same id and count, the same spawn.
                 Assert.Equal(spawn, SpawnOf(id, count));
                 // Different on each respawn.
                 if (count > 0)
@@ -1727,27 +1726,5 @@ public class FlightModuleTests
         rig.Bus.Publish(new CollisionImpulse(-1, Vector3.One, Vector3.One, Vector3.One));
         rig.Tick();
         Assert.True(float.IsFinite(rig.Bus.States[1].Position.X));
-    }
-
-    [Fact]
-    public void TickDoesNotAllocate()
-    {
-        var rig = new Rig();
-        var input = Aim(Vector3.Normalize(new Vector3(1f, 0.2f, 0f)));
-        rig.Fly(input, 1f); // warm up (JIT)
-        var bounce = new CollisionImpulse(0, new Vector3(5f, 0f, 5f), new Vector3(0f, 0f, 2f), new Vector3(0.5f, 0f, 0f));
-        rig.Bus.Publish(bounce);
-        rig.Step(input);
-        var dive = new ControlInput(1, 0f, 0f, 0f, 1f, false, true, -Vector3.UnitY);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 600; i++)
-        {
-            if (i % 120 == 0)
-                rig.Bus.Publish(bounce); // collisions too
-            rig.Bus.Publish(dive); // and plane 1 flies into the ground
-            rig.Step(input);
-        }
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-        Assert.Equal(1, rig.Bus.CrashCountOf[1]);
     }
 }

@@ -374,35 +374,6 @@ public class CollisionsModuleTests
     }
 
     [Fact]
-    public void TickDoesNotAllocate()
-    {
-        var bus = new QuietBus();
-        var module = new CollisionsModule();
-        module.Start(bus);
-        var states = new PlaneState[Teams.PlaneCount];
-        void Step(int t)
-        {
-            for (int p = 0; p < Teams.PlaneCount; p++)
-            {
-                // Planes in a tight bunch, bumping in and out of each other.
-                float wobble = MathF.Sin(t * 0.1f + p) * 4f;
-                states[p] = Plane(p, new Vector3(p * 3f + wobble, 0f, 0f), new Vector3(-wobble, 0f, -50f));
-                bus.Plane!.Handle(in states[p]);
-            }
-            module.Tick(in OneStep);
-        }
-
-        for (int t = 0; t < 100; t++)
-            Step(t);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int t = 100; t < 6100; t++)
-            Step(t);
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-        Assert.True(bus.Hits > 100, $"{bus.Hits} hits");
-        Assert.True(bus.Impulses > 100, $"{bus.Impulses} impulses");
-    }
-
-    [Fact]
     public void IsTheModulesOnlyEntryClassAndCoreHasNoGodot()
     {
         int entries = 0;

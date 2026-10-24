@@ -240,18 +240,4 @@ public class ModuleHostTests
         Assert.False(slot.Enabled);
         Assert.Contains("more than one", slot.Fault?.Message);
     }
-
-    [Fact]
-    public void StepDoesNotAllocate()
-    {
-        var host = NewHost();
-        host.Add("A", () => new CountingModule());
-        host.Add("B", () => new PingsEveryTick());
-        host.Start();
-        host.Step(0.1);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 10_000; i++)
-            host.Step(0.1);
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-    }
 }

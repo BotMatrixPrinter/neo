@@ -81,6 +81,6 @@ the plane.
   triggers, fire, Y repair, the dead zone and proportional response on every stick axis: 0 inside,
 continuous at the edge, linear, exactly ±1 at full deflection, 5%/50%/100% examples, non-finite = 0; what counts as touching the pad), `InputModuleTests` (one message per tick for plane 0,
   throttle start/smoothing/clamping, R and Y publish `Repair` every held tick with throttle still working, pad X/B throttle and sticks, keys fly the plane, `HasAim` false on keyboard and pad,
-  invert setting, latest state wins, no allocations per tick), with a fake bus.
+  invert setting, latest state wins), with a fake bus.
 
 Test it alone: `./test.sh Input`. The scene draws nothing, so it has no screenshot.

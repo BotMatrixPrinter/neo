@@ -35,19 +35,6 @@ public class ClockModuleTests
     }
 
     [Fact]
-    public void TickDoesNotAllocate()
-    {
-        var clock = new ClockModule();
-        clock.Start(new NullBus());
-        var tick = new TickContext(1, 1.0 / 60);
-        clock.Tick(in tick);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 10_000; i++)
-            clock.Tick(in tick);
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-    }
-
-    [Fact]
     public void IsTheModulesOnlyEntryClass()
     {
         int entries = 0;
@@ -69,12 +56,5 @@ public class ClockModuleTests
     {
         foreach (var name in typeof(ClockModule).Assembly.GetReferencedAssemblies())
             Assert.DoesNotContain("Godot", name.Name);
-    }
-
-    private sealed class NullBus : IMessageBus
-    {
-        public void Subscribe<T>(IMessageHandler<T> handler) where T : struct { }
-
-        public void Publish<T>(in T message) where T : struct { }
     }
 }

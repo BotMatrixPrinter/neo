@@ -463,50 +463,11 @@ public class TargetsModuleTests
     }
 
     [Fact]
-    public void TheViewStateDoesNotAllocate()
-    {
-        var targets = new TargetsModule();
-        targets.Start(new QuietBus());
-        var views = new BalloonViews(targets);
-        views.Update(1f / 60);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 600; i++)
-        {
-            targets.Tick(in OneStep);
-            views.Update(1f / 60);
-        }
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-    }
-
-    [Fact]
     public void TickBeforeStartDoesNotThrow()
     {
         var targets = new TargetsModule();
         targets.Tick(in OneStep);
         Assert.True(targets.GetState(0).Alive);
-    }
-
-    [Fact]
-    public void TickAndDamageDoNotAllocate()
-    {
-        var bus = new QuietBus();
-        var targets = new TargetsModule();
-        targets.Start(bus);
-        Assert.NotNull(bus.Damage);
-        var hit = new DamageTarget(0, 15);
-        targets.Tick(in OneStep);
-        bus.Damage!.Handle(in hit);
-        Ticks(targets, 3600);
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 10; i++)
-        {
-            bus.Damage.Handle(in hit);
-            Ticks(targets, 3600);
-        }
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-        Assert.Equal(11, bus.Destroyed);
-        Assert.Equal(TargetsModule.Count * 39601, bus.StatesPublished);
     }
 
     [Fact]

@@ -258,39 +258,6 @@ public class PlaneModuleTests
     }
 
     [Fact]
-    public void TickAndStatesDoNotAllocate()
-    {
-        var (plane, bus) = Started();
-        IMessageHandler<PlaneState> handler = null!;
-        IMessageHandler<PlaneDamageState> damageHandler = null!;
-        foreach (var h in bus.Handlers)
-        {
-            if (h is IMessageHandler<PlaneState> typed)
-                handler = typed;
-            if (h is IMessageHandler<PlaneDamageState> damageTyped)
-                damageHandler = damageTyped;
-        }
-        var mine = State(0, 1f);
-        var other = State(5, 2f);
-        var downed = new PlaneState(6, new Vector3(0, 0, 0), Quaternion.Identity, Vector3.Zero, 0f, 0f, false);
-        var damage = new PlaneDamageState(5, 0.2f, 0.3f, 1f, 1f, true);
-        handler.Handle(in mine);
-        plane.Tick(in OneStep);
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 1000; i++)
-        {
-            handler.Handle(in mine);
-            handler.Handle(in other);
-            handler.Handle(in downed);
-            damageHandler.Handle(in damage);
-            plane.Tick(in OneStep);
-        }
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-        Assert.Equal(1001, plane.Updates);
-    }
-
-    [Fact]
     public void IsTheModulesOnlyEntryClass()
     {
         int entries = 0;

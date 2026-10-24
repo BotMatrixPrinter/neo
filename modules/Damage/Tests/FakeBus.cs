@@ -37,34 +37,3 @@ internal sealed class FakeBus : IMessageBus
 
     public void Clear() => Published.Clear();
 }
-
-/// <summary>A bus that keeps only the <see cref="PlaneHit"/> and <see cref="ControlInput"/> handlers and counts what is published (no allocations).</summary>
-internal sealed class QuietBus : IMessageBus
-{
-    public IMessageHandler<PlaneHit>? Hits;
-    public IMessageHandler<ControlInput>? Controls;
-    public int RepairsPublished;
-    public int StatesPublished;
-    public int Destroyed;
-    public int Respawned;
-
-    public void Subscribe<T>(IMessageHandler<T> handler) where T : struct
-    {
-        if (handler is IMessageHandler<PlaneHit> hits)
-            Hits = hits;
-        if (handler is IMessageHandler<ControlInput> controls)
-            Controls = controls;
-    }
-
-    public void Publish<T>(in T message) where T : struct
-    {
-        if (typeof(T) == typeof(PlaneDamageState))
-            StatesPublished++;
-        else if (typeof(T) == typeof(PlaneDestroyed))
-            Destroyed++;
-        else if (typeof(T) == typeof(PlaneRespawn))
-            Respawned++;
-        else if (typeof(T) == typeof(RepairState))
-            RepairsPublished++;
-    }
-}

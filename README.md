@@ -110,7 +110,12 @@ game assets (textures, icons) are committed as usual. Screenshots are not tests:
 - **Performance:** a fixed-timestep simulation in Core (`Tick` is the fixed step); plain
   structs and arrays; no allocations, LINQ or boxing in per-frame code (`Tick`, message
   handlers, `_Process`); bus messages are structs and publishing does not allocate;
-  Godot nodes only render.
+  Godot nodes only render. These rules are kept by writing the code that way and are
+  checked by reading it (the checker), not by tests.
+- **Tests are deterministic:** the same code gives the same result on every run and
+  machine. No test asserts on memory allocations (`GC.GetAllocatedBytes*`), timing or
+  speed (`Stopwatch`), wall-clock time (`DateTime.Now`) or unseeded randomness; such
+  tests fail at random on busy test machines.
 - **Tests stay fast:** Core logic is tested without Godot; the Godot check only loads
   the project.
 - All projects target `net10.0` (.NET 10 SDK, pinned in `global.json`). Package

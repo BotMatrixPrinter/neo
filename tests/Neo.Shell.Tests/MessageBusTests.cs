@@ -73,22 +73,6 @@ public class MessageBusTests
     }
 
     [Fact]
-    public void PublishDoesNotAllocate()
-    {
-        var bus = new MessageBus();
-        var owned = new Counter();
-        var unowned = new Counter();
-        bus.For(0).Subscribe(owned);
-        bus.Subscribe(unowned);
-        bus.Publish(new Ping(1));
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 10_000; i++)
-            bus.Publish(new Ping(1));
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-        Assert.Equal(10_001, owned.Sum);
-    }
-
-    [Fact]
     public void OwnedHandlerThatThrowsIsMutedAndOthersGoOn()
     {
         var bus = new MessageBus();

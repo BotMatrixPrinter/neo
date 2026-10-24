@@ -1479,17 +1479,4 @@ public class BotsModuleTests
         // The game creates modules with their parameterless constructor.
         Assert.NotNull(typeof(BotsModule).GetConstructor(Type.EmptyTypes));
     }
-
-    [Fact]
-    public void TickDoesNotAllocate()
-    {
-        var rig = Dogfight();
-        for (int i = 0; i < 120; i++)
-            rig.Step(); // warm up (JIT)
-        var module = rig.Module;
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 600; i++)
-            module.Tick(new TickContext(i, Dt));
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-    }
 }

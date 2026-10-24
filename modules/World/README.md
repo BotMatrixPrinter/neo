@@ -101,7 +101,7 @@ around it. Planes can hit the ground and the mountains: use `Terrain.HeightAt` f
     shell loads only `Main.tscn`).
   - Colors and light energies were tuned on the screenshot renderer (Compatibility/OpenGL).
   Other modules may copy the shaders' approach but must not reference these files.
-- **Tests** (`Tests/`): `WorldModuleTests`: starts and ticks without allocating, is the only
+- **Tests** (`Tests/`): `WorldModuleTests`: starts and ticks, is the only
   entry class, targets net10.0, no Godot in Core or Contract, `HalfSize` is 1000 (a 2 km
   square). `TerrainTests`: heights within `WaterLevel..MaxHeight` everywhere (out to 7 km beyond the edge), the
   tallest peak's top is `MaxHeight`; inside the square at most `InnerMaxHeight`, reached, and
@@ -114,7 +114,7 @@ around it. Planes can hit the ground and the mountains: use `Terrain.HeightAt` f
   ridge with saddles hundreds of meters under its peaks; on each side a valley that rises and
   narrows toward the ridge; the inner mountains where documented (tops highest), open rolling land elsewhere,
   each side's spawn half mostly low, flat low center and start areas, flat water on the river
-  and lake; same answer every call without allocating (and a pinned value); the ground mesh
+  and lake; same answer every call (and a pinned value); the ground mesh
   grid matches `HeightAt` within 1 m, and the range's ring mesh joins it vertex for vertex and,
   out past the ridge, matches `HeightAt` within 5 m + 2.5 % up to 1300 m (8 % above, out of
   planes' reach).

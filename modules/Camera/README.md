@@ -49,6 +49,6 @@ Screenshot (not committed): `./screenshot.sh modules/Camera/Godot/Main.tscn` (`C
 behind and above a level and a pitched, banked, turned plane; looks slightly ahead; no drift
 at steady speed; lags when the plane speeds up and through a sharp turn, then settles; more
 rotation lag rolling than yawing; fov 70 to 80 with speed, smoothly; previous pose kept for
-interpolation; no allocations.
+interpolation.
 
 Test it alone: `./test.sh Camera`.
