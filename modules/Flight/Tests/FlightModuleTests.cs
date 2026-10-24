@@ -217,7 +217,7 @@ public class FlightModuleTests
         {
             Assert.True(p.Speed >= FlightModel.MinSpeed, "no stall");
             Assert.InRange(p.Velocity.Length(), p.Speed - 0.01f, p.Speed + 0.01f);
-            BelowCeiling(p);
+            
             lowest = MathF.Min(lowest, p.Speed);
         });
         Assert.InRange(lowest, FlightModel.MinSpeed, FlightModel.MinSpeed + 5f);
@@ -249,7 +249,7 @@ public class FlightModuleTests
                 // Gently: never faster than the pitch rate, no snap.
                 Assert.True(MathF.Abs(Climb(p) - previous) * 60f < FlightModel.PitchRate * 1.05f, "eased, not snapped");
                 previous = Climb(p);
-                BelowCeiling(p);
+                
             });
             Assert.True(steepest > 40f * Deg, $"aim {aim}: it pulled up steeply first ({steepest / Deg} deg)");
             Assert.InRange(s.Speed, FlightModel.MinSpeed, FlightModel.MinSpeed + 0.5f);
@@ -264,11 +264,15 @@ public class FlightModuleTests
         }
     }
 
-    /// <summary>Aims level, the heading turning slowly (6 deg/s) from north: a wide circle.</summary>
-    private static PlaneState FlyLevelCircle(Rig rig, float throttle, float seconds, ref float t)
+    /// <summary>Aims level (or <paramref name="rise"/> up: 1 is 45 degrees), the heading turning slowly
+    /// (6 deg/s) from north: a wide circle.</summary>
+    private static PlaneState FlyLevelCircle(Rig rig, float throttle, float seconds, ref float t, float rise = 0f, Action<PlaneState>? check = null)
     {
         for (int i = 0; i < (int)MathF.Round(seconds * 60f); i++, t += (float)Dt)
-            rig.Step(Aim(new Vector3(MathF.Sin(6f * Deg * t), 0f, -MathF.Cos(6f * Deg * t)), throttle));
+        {
+            var s = rig.Step(Aim(Vector3.Normalize(new Vector3(MathF.Sin(6f * Deg * t), rise, -MathF.Cos(6f * Deg * t))), throttle));
+            check?.Invoke(s);
+        }
         return rig.Bus.States[0];
     }
 
@@ -277,8 +281,12 @@ public class FlightModuleTests
     {
         Assert.InRange(FlightModel.DiveMaxSpeed, 80f, 90f);
         var rig = ClimbTo(15f, 900f, out _);
+        float t0 = 0f;
+        FlyLevelCircle(rig, 1f, 30f, ref t0); // speed back (the engine is weaker up here), clear of the border
         float top = 0f, previous = rig.Bus.States[0].Speed;
-        var s = rig.Fly(Aim(Vector3.Normalize(new Vector3(0f, -1f, -0.1f)), throttle: 1f), 6f, p =>
+        Vector3 ahead = Forward(rig.Bus.States[0]) * new Vector3(1f, 0f, 1f);
+        // (High up the engine's level max is lower, so drag starts earlier: the dive needs a little longer.)
+        var s = rig.Fly(Aim(Vector3.Normalize(ahead * 0.1f - Vector3.UnitY), throttle: 1f), 8f, p =>
         {
             Assert.True(p.Speed <= FlightModel.DiveMaxSpeed, $"capped: {p.Speed}");
             Assert.InRange(p.Velocity.Length(), p.Speed - 0.01f, p.Speed + 0.01f);
@@ -621,159 +629,194 @@ public class FlightModuleTests
         return rig;
     }
 
-    private static void BelowCeiling(PlaneState s) =>
-        Assert.True(s.Position.Y < FlightModel.CeilingAltitude, $"at {s.Position.Y} m"); // levelled before the backstop
-
     [Fact]
-    public void Ceiling_ClimbIsEasedOffSmoothlyAndLevelsJustBelow1000m()
+    public void AltitudePower_FallsSmoothlyWithHeight_NothingLeftAt1000m_NoLimit()
     {
-        Assert.Equal(1000f, FlightModel.CeilingAltitude);
-        Assert.Equal(950f, FlightModel.CeilingEaseStart);
-
-        foreach (float degrees in new[] { 20f, 45f, 80f })
+        Assert.Equal(1000f, FlightModel.PowerAltitude);
+        Assert.InRange(FlightModel.PowerAltitudeSpeed, 38f, 42f); // about cruise
+        // Full at the ground (exactly as before: the engine's level max and its most added acceleration).
+        foreach (float engine in new[] { 0f, 0.5f, 1f })
         {
-            // Hands off in a steady climb: the held climb would go through the ceiling, it is levelled at it.
-            var rig = ClimbTo(degrees, FlightModel.CeilingEaseStart - 20f, out _);
-            float previous = Climb(rig.Bus.States[0]), previousRate = 0f, highest = 0f;
-            bool first = true;
-            var end = rig.Fly(Sticks(throttle: 1f), 20f, s =>
+            Assert.Equal(FlightModel.MaxSpeedNowFor(engine), FlightModel.LevelMaxSpeed(engine, 0f));
+            Assert.Equal(FlightModel.MaxThrustAcceleration * FlightModel.MaxSpeedNowFor(engine) / FlightModel.MaxSpeed,
+                FlightModel.ClimbPower(engine, 0f), 5);
+        }
+        // Falls smoothly and keeps falling, with no step or flat top anywhere up to 1.5 km.
+        float previousLoss = -1f, previousStep = 0f;
+        for (int h = 0; h <= 1500; h += 10)
+        {
+            float loss = FlightModel.AltitudePowerLoss(h);
+            if (h > 0)
             {
-                BelowCeiling(s);
-                highest = MathF.Max(highest, s.Position.Y);
-                float climb = Climb(s), rate = (climb - previous) * 60f;
-                // Eased off: the nose only comes down (no bounce), at a rate that changes gradually (no jerk).
-                Assert.True(rate < 0.2f * Deg * 60f, $"{degrees}: nose came back up at {s.Position.Y} m: {rate / Deg} deg/s");
-                if (!first)
-                    Assert.True(MathF.Abs(rate - previousRate) < (degrees < 60f ? 4f : 10f) * Deg, $"{degrees}: jerk at {s.Position.Y} m: {previousRate / Deg} -> {rate / Deg} deg/s");
-                Assert.True(rate > -FlightModel.PitchRate * 1.05f, "no faster than the pitch rate");
-                first = false;
-                previous = climb;
-                previousRate = rate;
-            });
-            Assert.True(highest < FlightModel.CeilingAltitude, $"{degrees}: never at the backstop ({highest} m)");
-            Assert.InRange(end.Position.Y, FlightModel.CeilingAltitude - 3f, FlightModel.CeilingAltitude);
-            Assert.True(MathF.Abs(Climb(end)) < 0.5f * Deg, $"{degrees}: level, {Climb(end) / Deg} deg");
-            Assert.True(MathF.Abs(Bank(end)) < 0.5f * Deg, "wings level");
+                Assert.True(loss > previousLoss, $"keeps falling at {h} m");
+                // Smooth: each 10 m loses a little more than the last, never a jump.
+                Assert.True(loss - previousLoss >= previousStep - 1e-6f, $"smooth at {h} m");
+                Assert.True(loss - previousLoss < (h <= 1000 ? 0.04f : 0.15f), $"no jump at {h} m");
+                previousStep = loss - previousLoss;
+            }
+            previousLoss = loss;
         }
+        // At 1000 m full throttle holds level at about cruise with nothing left to climb; above, not even that.
+        Assert.Equal(1f, FlightModel.AltitudePowerLoss(1000f), 5);
+        Assert.InRange(FlightModel.LevelMaxSpeed(1f, 1000f), 39.5f, 40.5f);
+        Assert.Equal(0f, FlightModel.ClimbPower(1f, 1000f), 4);
+        Assert.True(FlightModel.ClimbPower(1f, 1100f) < -0.5f);
+        Assert.True(FlightModel.LevelMaxSpeed(1f, 1100f) < FlightModel.LevelMaxSpeed(1f, 1000f));
+        // Engine damage lowers it on top of height.
+        Assert.True(FlightModel.ClimbPower(0f, 600f) < FlightModel.ClimbPower(1f, 600f) * 0.7f);
+        // No hard ceiling left in the model.
+        foreach (var field in typeof(FlightModel).GetFields())
+            Assert.DoesNotContain("Ceiling", field.Name);
     }
 
     [Fact]
-    public void Ceiling_FullUpStickFliesLevelAlongIt_ThePilotCanDiveAwayAtOnce()
+    public void LowAltitudePerformanceIsUnchanged()
     {
-        var rig = ClimbTo(45f, FlightModel.CeilingEaseStart - 20f, out _);
-        // Full up-stick (a loop anywhere lower) into the ceiling, for 10 s.
-        float highest = 0f;
-        rig.Fly(Sticks(pitch: 1f, throttle: 1f), 10f, s => { BelowCeiling(s); highest = MathF.Max(highest, s.Position.Y); });
-        Assert.True(highest < FlightModel.CeilingAltitude, $"never at the backstop ({highest} m)");
-        // At the ceiling now: level, steady, no bounce or jitter.
-        float previousY = rig.Bus.States[0].Position.Y;
-        float previousClimb = Climb(rig.Bus.States[0]);
-        var end = rig.Fly(Sticks(pitch: 1f, throttle: 1f), 10f, s =>
-        {
-            BelowCeiling(s);
-            Assert.InRange(s.Position.Y, FlightModel.CeilingAltitude - 2f, FlightModel.CeilingAltitude);
-            Assert.True(s.Position.Y >= previousY - 1e-3f, $"bounced: {previousY} -> {s.Position.Y} m");
-            Assert.True(MathF.Abs(Climb(s)) < 0.5f * Deg, $"climb {Climb(s) / Deg} deg");
-            Assert.True(MathF.Abs(Climb(s) - previousClimb) < 0.05f * Deg, "no jitter");
-            previousY = s.Position.Y;
-            previousClimb = Climb(s);
-        });
-        Assert.InRange(end.Speed, FlightModel.MaxSpeed - 1f, FlightModel.MaxSpeed);
-
-        // Push: the nose goes down at once, as fast as anywhere.
-        var s = rig.Fly(Sticks(pitch: -1f, throttle: 1f), 0.5f);
-        Assert.True(Climb(s) < -25f * Deg, $"climb {Climb(s) / Deg} deg");
-        s = rig.Fly(Sticks(pitch: -1f, throttle: 1f), 0.3f);
-        Assert.True(s.Position.Y < FlightModel.CeilingAltitude - 5f, $"at {s.Position.Y} m");
-
-        // Below it the plane steers freely: rolls, and pulls up again (eased off once more near the top).
-        rig = ClimbTo(45f, FlightModel.CeilingEaseStart - 20f, out _);
-        rig.Fly(Sticks(pitch: 1f, throttle: 1f), 20f);
-        s = rig.Fly(Sticks(roll: 1f, throttle: 1f), 0.4f, BelowCeiling);
-        Assert.True(Bank(s) > 50f * Deg, $"bank {Bank(s) / Deg} deg");
-        // Banked and pulling at the ceiling: a level turn along it.
-        float heading = Heading(s);
-        s = rig.Fly(Sticks(pitch: 1f, throttle: 1f), 1f, BelowCeiling);
-        Assert.True(MathF.Abs(Heading(s) - heading) > 20f * Deg, "turns");
-        Assert.True(s.Position.Y > FlightModel.CeilingAltitude - 5f, $"at {s.Position.Y} m");
-        rig.Fly(Sticks(roll: -1f, throttle: 1f), 0.4f, BelowCeiling);
-        FlyUntil(rig, Sticks(pitch: -1f, throttle: 1f), p => Climb(p) < -30f * Deg);
-        FlyUntil(rig, Sticks(throttle: 1f), p => p.Position.Y < 880f);
-        s = FlyUntil(rig, Sticks(pitch: 1f, throttle: 1f), p => Climb(p) > 30f * Deg);
-        Assert.True(s.Position.Y < FlightModel.CeilingEaseStart, $"pulls up freely below the band: at {s.Position.Y} m");
-
-        // Let go at the ceiling after full up-stick: it keeps flying level along it, hands off.
-        rig = ClimbTo(45f, FlightModel.CeilingEaseStart - 20f, out _);
-        rig.Fly(Sticks(pitch: 1f, throttle: 1f), 8f, BelowCeiling);
-        s = rig.Fly(Sticks(throttle: 1f), 6f, p =>
-        {
-            BelowCeiling(p);
-            Assert.True(MathF.Abs(Climb(p)) < 0.5f * Deg && p.Position.Y > FlightModel.CeilingAltitude - 1f, $"climb {Climb(p) / Deg} deg at {p.Position.Y} m");
-        });
-        Assert.True(MathF.Abs(s.Position.Z) < FlightModel.AreaHalfSize - FlightModel.BorderMargin, "clear of the border guard");
+        // Low down the engine is all there (under 1% lost at 200 m).
+        Assert.True(FlightModel.LevelMaxSpeed(1f, 200f) > FlightModel.MaxSpeed * 0.997f);
+        Assert.True(FlightModel.ClimbPower(1f, 200f) > FlightModel.MaxThrustAcceleration * 0.99f);
+        // Down to 200 m, then full throttle level: the old 60 m/s; a 10 degree climb keeps most of it, as before.
+        var rig = new Rig();
+        for (int i = 0; i < 60 * 30 && rig.Step(Aim(Vector3.Normalize(new Vector3(0f, -0.35f, -1f)))).Position.Y > 230f; i++) { }
+        var s = rig.Fly(Aim(Level, throttle: 1f), 25f);
+        Assert.InRange(s.Position.Y, 150f, 250f);
+        Assert.InRange(s.Speed, 59.5f, 60f);
+        s = rig.Fly(Aim(Vector3.Normalize(new Vector3(0f, MathF.Sin(10f * Deg), -MathF.Cos(10f * Deg))), throttle: 1f), 8f);
+        Assert.True(s.Position.Y < 400f);
+        Assert.InRange(s.Speed, 55f, 60f);
     }
 
-    [Fact]
-    public void Ceiling_HoldsForEveryPilot_AimSticksDamageInvertedAndRandom()
+    /// <summary>Flies with the aim (full throttle) for <paramref name="seconds"/>; plane <paramref name="id"/> only.</summary>
+    private static PlaneState FlyPlane(Rig rig, int id, Vector3 aim, float seconds, Action<PlaneState>? check = null)
     {
-        // Mouse aimed straight up, and steeply up.
-        new Rig().Fly(Aim(Vector3.UnitY, throttle: 1f), 60f, BelowCeiling);
-        var s = new Rig().Fly(Aim(Vector3.Normalize(new Vector3(0f, 1f, -1f)), throttle: 1f), 60f, BelowCeiling);
-        Assert.True(s.Position.Y > FlightModel.CeilingAltitude - 5f, $"flies along the ceiling, at {s.Position.Y} m");
-
-        // Inverted, pushing up (the nose goes toward the canopy, now below): climbs inverted into the ceiling.
-        var rig = ClimbTo(45f, FlightModel.CeilingEaseStart - 20f, out _);
-        FlyUntil(rig, Sticks(roll: 1f, throttle: 1f), p => Bank(p) > 175f * Deg);
-        rig.Fly(Sticks(pitch: -1f, throttle: 1f), 20f, BelowCeiling);
-
-        // A dead tail pitches too slowly to level out in the band: the backstop holds it at 1000 m, level.
-        rig = ClimbTo(45f, FlightModel.CeilingEaseStart - 40f, out _);
-        rig.Bus.Publish(Health(0, tail: 0f));
-        s = rig.Fly(Sticks(pitch: 1f, throttle: 1f), 30f, p => Assert.True(p.Position.Y <= FlightModel.CeilingAltitude));
-        Assert.True(MathF.Abs(Climb(s)) < 0.5f * Deg, $"climb {Climb(s) / Deg} deg");
-        Assert.True(MathF.Abs(s.Velocity.Y) < 0.5f, "flies along it, not into it");
-
-        // Bots too: plane 5 aimed straight up.
-        rig = new Rig();
-        for (int i = 0; i < 60 * 60; i++)
+        for (int i = 0; i < (int)MathF.Round(seconds * 60f); i++)
         {
-            rig.Bus.Publish(new ControlInput(5, 0f, 0f, 0f, 1f, false, true, Vector3.UnitY));
+            rig.Bus.Publish(new ControlInput(id, 0f, 0f, 0f, 1f, false, true, aim));
             rig.Tick();
-            Assert.True(rig.Bus.States[5].Position.Y < FlightModel.CeilingAltitude);
+            check?.Invoke(rig.Bus.States[id]);
         }
-        Assert.True(rig.Bus.States[5].Position.Y > FlightModel.CeilingAltitude - 5f);
+        return rig.Bus.States[id];
+    }
 
-        uint seed = 11;
+    [Theory]
+    [InlineData(0)] // the player
+    [InlineData(5)] // a bot
+    public void FullThrottleClimb_SlowsWithHeight_AndLevelsOffAround1000mByItself(int id)
+    {
+        // Aimed straight up at full throttle for 5 minutes: the climb rate falls with height.
+        var rig = new Rig();
+        float sum400 = 0f, sum700 = 0f, sum900 = 0f, highest = 0f;
+        int n400 = 0, n700 = 0, n900 = 0, steps = 0, healthyTo800 = 0;
+        var end = FlyPlane(rig, id, Vector3.UnitY, 300f, p =>
+        {
+            float y = p.Position.Y;
+            steps++;
+            if (healthyTo800 == 0 && y > 800f) healthyTo800 = steps;
+            highest = MathF.Max(highest, y);
+            Assert.True(p.Speed >= FlightModel.MinSpeed);
+            if (y > 500f && y < 600f) { sum400 += p.Velocity.Y; n400++; }
+            else if (y > 750f && y < 850f) { sum700 += p.Velocity.Y; n700++; }
+            else if (y > 930f && y < 970f) { sum900 += p.Velocity.Y; n900++; }
+        });
+        float rate500 = sum400 / n400, rate800 = sum700 / n700, rate950 = sum900 / n900;
+        Assert.True(rate500 > rate800 * 1.3f && rate800 > rate950 * 2f && rate950 > 0f,
+            $"climb rates {rate500} m/s at 500-600 m, {rate800} at 750-850 m, {rate950} at 930-970 m");
+        // It levels off on its own around 1000 m: no clamp, just no power left to climb.
+        Assert.InRange(highest, 990f, 1005f);
+        Assert.InRange(end.Position.Y, 990f, 1005f);
+        Assert.True(MathF.Abs(end.Velocity.Y) < 0.2f, $"still climbing at {end.Velocity.Y} m/s");
+
+        // A dead engine climbs slower and levels off lower.
         rig = new Rig();
-        for (int i = 0; i < 60 * 120; i++)
-            BelowCeiling(rig.Step(RandomInput(ref seed, i)));
+        rig.Bus.Publish(Health(id, engine: 0f));
+        int deadTo800 = 0;
+        steps = 0;
+        end = FlyPlane(rig, id, Vector3.UnitY, 300f, p => { steps++; if (deadTo800 == 0 && p.Position.Y > 800f) deadTo800 = steps; });
+        Assert.True(deadTo800 > healthyTo800 * 1.2f, $"to 800 m: dead engine {deadTo800 / 60} s, healthy {healthyTo800 / 60} s");
+        Assert.True(end.Position.Y < 985f, $"dead engine levels off at {end.Position.Y} m");
+    }
+
+    /// <summary>Climbs at 15 degrees (full throttle) to 970 m, then flies a wide level circle at full throttle
+    /// for two minutes to gather the most speed that height allows (about 41 m/s).</summary>
+    private static Rig FastAt980m(out float t)
+    {
+        var rig = new Rig();
+        var up = Aim(Vector3.Normalize(new Vector3(0f, MathF.Sin(15f * Deg), -MathF.Cos(15f * Deg))), throttle: 1f);
+        for (int i = 0; i < 60 * 120 && rig.Bus.States[0].Position.Y < 970f; i++)
+            rig.Step(up);
+        t = 0f;
+        var s = FlyLevelCircle(rig, 1f, 120f, ref t);
+        Assert.InRange(s.Position.Y, 970f, 995f);
+        Assert.True(s.Speed > 40f, $"{s.Speed} m/s");
+        return rig;
     }
 
     [Fact]
-    public void Ceiling_BelowTheBandNothingChanges()
+    public void ZoomClimb_PassesPowerAltitudeBriefly_ThenSinksBack_NoClampNoBounce()
     {
-        // A held 15 degree climb (one the engine keeps up) is kept within a degree all the way up to 950 m.
-        var rig = ClimbTo(15f, 600f, out var released);
-        float held = Climb(released);
-        while (rig.Bus.States[0].Position.Y < FlightModel.CeilingEaseStart - 1f)
+        foreach (bool handsOff in new[] { false, true })
         {
-            var p = rig.Step(Sticks(throttle: 1f));
-            Assert.True(MathF.Abs(Climb(p) - held) < 1f * Deg, $"at {p.Position.Y} m: {Climb(p) / Deg} deg, held {held / Deg}");
-        }
+            // Fast near the top, then a steep full-throttle zoom (aimed 45 degrees up, still circling):
+            // it trades its speed for height, past 1000 m.
+            var rig = FastAt980m(out float t);
+            float highest = 0f;
+            FlyLevelCircle(rig, 1f, 6f, ref t, rise: 1f, p => highest = MathF.Max(highest, p.Position.Y));
+            Assert.True(highest > FlightModel.PowerAltitude + 30f, $"zoomed to {highest} m");
 
-        // A full up-stick loop near the band still goes over the top: past vertical, inverted at the top.
-        rig = ClimbTo(15f, 800f, out _);
-        FlyUntil(rig, Sticks(pitch: -1f, throttle: 1f), p => Climb(p) < 1f * Deg);
-        rig.Fly(Sticks(throttle: 1f), 5f); // back to full speed
-        float startY = rig.Bus.States[0].Position.Y, highest = 0f;
-        bool inverted = false;
-        rig.Fly(Sticks(pitch: 1f, throttle: 1f), 4f, p =>
+            // Then, still aiming 45 degrees up, or hands off: too little power up there, so it sinks back, smoothly.
+            float previous = rig.Bus.States[0].Position.Y;
+            void Sinks(PlaneState p)
+            {
+                if (p.Position.Y > FlightModel.PowerAltitude) // (hands off, back below, may meet the border guard)
+                    Assert.True(p.Position.Y <= previous + 0.01f, $"bounced: {previous} -> {p.Position.Y} m");
+                Assert.True(p.Speed >= FlightModel.MinSpeed);
+                previous = p.Position.Y;
+            }
+            if (handsOff)
+            {
+                // Hands off keeps its glide: back below 1000 m.
+                var end = rig.Fly(Sticks(throttle: 1f), 40f, Sinks);
+                Assert.True(end.Position.Y < FlightModel.PowerAltitude, $"hands off at {end.Position.Y} m");
+                continue;
+            }
+            var s = FlyLevelCircle(rig, 1f, 40f, ref t, rise: 1f, Sinks);
+            Assert.True(s.Position.Y < highest - 20f, $"at {s.Position.Y} m");
+            s = FlyLevelCircle(rig, 1f, 80f, ref t, rise: 1f, Sinks);
+            Assert.InRange(s.Position.Y, FlightModel.PowerAltitude - 5f, FlightModel.PowerAltitude + 3f);
+        }
+    }
+
+    [Fact]
+    public void LevelFlightAt1000m_HoldsAboutCruise_AnyClimbThereBleedsSpeed()
+    {
+        // Up to 1000 m with speed: a very gentle climb from the fast level circle.
+        var rig = FastAt980m(out float t);
+        while (rig.Bus.States[0].Position.Y < FlightModel.PowerAltitude - 3f)
         {
+            rig.Step(Aim(new Vector3(MathF.Sin(6f * Deg * t), 0.02f, -MathF.Cos(6f * Deg * t)), 1f));
+            t += (float)Dt;
+        }
+        // Level at full throttle: the speed holds, about cruise, and so does the height.
+        float startY = rig.Bus.States[0].Position.Y, startSpeed = rig.Bus.States[0].Speed;
+        Assert.InRange(startSpeed, 36f, 42f);
+        var s = FlyLevelCircle(rig, 1f, 30f, ref t);
+        Assert.InRange(s.Speed, 36f, 42f);
+        Assert.InRange(s.Speed, startSpeed - 1f, startSpeed + 1f);
+        Assert.InRange(s.Position.Y, startY - 3f, startY + 3f);
+
+        // A climb there only bleeds speed, until the nose drops near the minimum: no climbing left.
+        float previous = s.Speed, highest = 0f;
+        for (int i = 0; i < 60 * 25; i++, t += (float)Dt)
+        {
+            var p = rig.Step(Aim(Vector3.Normalize(new Vector3(MathF.Sin(6f * Deg * t), 0.15f, -MathF.Cos(6f * Deg * t))), 1f));
+            Assert.True(p.Speed <= previous + 1e-3f, $"climbing at 1000 m gains no speed: {previous} -> {p.Speed}");
+            previous = p.Speed;
             highest = MathF.Max(highest, p.Position.Y);
-            inverted |= Vector3.Transform(Vector3.UnitY, p.Orientation).Y < -0.9f;
-        });
-        Assert.True(inverted, "looped over the top");
-        Assert.True(highest < FlightModel.CeilingEaseStart, $"top at {highest} m (started at {startY} m)");
+        }
+        s = rig.Bus.States[0];
+        Assert.True(s.Speed < FlightModel.MinSpeed + 3f, $"bled to {s.Speed} m/s");
+        Assert.True(Climb(s) < 3f * Deg, $"still climbing at {Climb(s) / Deg} deg");
+        Assert.True(highest < startY + 60f, $"only the speed's height: {highest} m");
     }
 
     [Fact]
@@ -903,7 +946,10 @@ public class FlightModuleTests
         Assert.InRange(rig.Bus.States[1].Speed, 35.5f, 36.5f); // dead engine: 60%
         Assert.InRange(rig.Bus.States[2].Speed, 47.5f, 48.5f); // half: 80%
         rig.Run(20f);
-        Assert.InRange(rig.Bus.States[1].Speed, 35.9f, 36.05f);
+        // At the start's 400 m height loses a little (2.6% of the 1000 m loss) on top of the damage.
+        float deadMax = FlightModel.LevelMaxSpeed(0f, rig.Bus.States[1].Position.Y);
+        Assert.InRange(deadMax, 35.5f, 36f);
+        Assert.InRange(rig.Bus.States[1].Speed, deadMax - 0.1f, deadMax + 0.05f);
 
         // The same climb bleeds a dead engine's speed faster; the same dive builds less, still capped.
         rig = new Rig();

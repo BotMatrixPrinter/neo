@@ -8,9 +8,10 @@ namespace Neo.Flight;
 /// Arcade flight of one plane: not a simulation. The plane always flies along its nose at
 /// a speed between <see cref="MinSpeed"/> and <see cref="DiveMaxSpeed"/> (no stall, no spin; the
 /// throttle sets the level speed, gravity along the flight path slows climbs and speeds up dives),
-/// turns at fixed body rates, and is kept above <see cref="FloorAltitude"/>, below
-/// <see cref="CeilingAltitude"/> and inside the <see cref="AreaHalfSize"/> square by steering it
-/// gently away. Damage slows it, drags it into a roll and weakens its tail; a downed plane falls
+/// turns at fixed body rates, and is kept above <see cref="FloorAltitude"/> and inside the
+/// <see cref="AreaHalfSize"/> square by steering it gently away. No hard ceiling: the engine loses
+/// power as the plane climbs, until at <see cref="PowerAltitude"/> full throttle only holds level
+/// flight, so climbs level off there by themselves. Damage slows it, drags it into a roll and weakens its tail; a downed plane falls
 /// to the ground until it respawns.
 /// Deterministic; Step does not allocate.
 /// </summary>
@@ -57,13 +58,12 @@ public sealed class FlightModel
     /// <summary>Height above the floor kept free, plus the drop of the next seconds of descent.</summary>
     public const float FloorMargin = 40f;
     public const float FloorLookahead = 2.5f;
-    /// <summary>No plane flies above this (m).</summary>
-    public const float CeilingAltitude = 1000f;
-    /// <summary>Depth (m) of the band below the ceiling where the climb is eased off: from 950 m up.</summary>
-    public const float CeilingBand = 50f;
-    public const float CeilingEaseStart = CeilingAltitude - CeilingBand;
-    /// <summary>Time constant (s) with which the climb is brought down to the band's limit.</summary>
-    public const float CeilingResponse = 0.25f;
+    /// <summary>Height (m) where full throttle only just holds level flight (at <see cref="PowerAltitudeSpeed"/>):
+    /// the engine's power falls with height (see <see cref="AltitudePowerLoss"/>), its climbing power is gone here
+    /// and above it there is not even enough for level flight, so the plane sinks back. Not a limit: nothing clamps.</summary>
+    public const float PowerAltitude = 1000f;
+    /// <summary>Level max speed (m/s, healthy engine, full throttle) at <see cref="PowerAltitude"/>: about cruise.</summary>
+    public const float PowerAltitudeSpeed = 40f;
 
     public const float MaxAimBank = 75f * Deg;
 
@@ -139,8 +139,34 @@ public sealed class FlightModel
     public bool Alive => _alive;
     /// <summary>Down and come to rest on the ground.</summary>
     public bool Grounded => _grounded;
-    /// <summary>Max level speed with the engine's current health (dives go faster).</summary>
+    /// <summary>Max level speed with the engine's current health, at the ground (dives go faster; height lowers it,
+    /// see <see cref="LevelMaxSpeed"/>).</summary>
     public float MaxSpeedNow => MaxSpeedNowFor(_engine);
+
+    /// <summary>
+    /// Share (0 at the ground, 1 at <see cref="PowerAltitude"/>, more above) of the engine's power lost to height:
+    /// (h / <see cref="PowerAltitude"/>)^4, a smooth curve, so low down almost nothing is lost (0.2% at 200 m,
+    /// 2.6% at 400 m, 13% at 600 m) and most of it goes in the last few hundred meters. No limit above.
+    /// </summary>
+    public static float AltitudePowerLoss(float altitude)
+    {
+        float x = MathF.Max(altitude, 0f) / PowerAltitude;
+        x *= x;
+        return x * x;
+    }
+
+    /// <summary>Max level speed (m/s) with an engine of health <paramref name="engine"/> at <paramref name="altitude"/> m:
+    /// <see cref="MaxSpeedNowFor"/> at the ground, falling with the power lost to height to
+    /// <see cref="PowerAltitudeSpeed"/> (x the engine's share) at <see cref="PowerAltitude"/>, and further above.</summary>
+    public static float LevelMaxSpeed(float engine, float altitude) =>
+        MaxSpeedNowFor(engine) * (1f - (1f - PowerAltitudeSpeed / MaxSpeed) * AltitudePowerLoss(altitude));
+
+    /// <summary>Most the throttle can add (m/s^2) with an engine of health <paramref name="engine"/> at
+    /// <paramref name="altitude"/> m: <see cref="MaxThrustAcceleration"/> x the engine's share x the power left
+    /// (1 - <see cref="AltitudePowerLoss"/>): 0 at <see cref="PowerAltitude"/>, nothing left for climbing,
+    /// negative above (a loss even in level flight).</summary>
+    public static float ClimbPower(float engine, float altitude) =>
+        MaxThrustAcceleration * MaxSpeedNowFor(engine) / MaxSpeed * (1f - AltitudePowerLoss(altitude));
     /// <summary>Max level speed with an engine of health <paramref name="engine"/> (0..1).</summary>
     public static float MaxSpeedNowFor(float engine) => MaxSpeed * (DeadEngineMaxSpeed + (1f - DeadEngineMaxSpeed) * engine);
 
@@ -232,11 +258,11 @@ public sealed class FlightModel
             yaw = input.Yaw;
         }
 
-        if (_position.Y > CeilingEaseStart)
-            ClimbLimit(climb, MaxClimb, CeilingResponse, ref pitch);
-        // Too slow to keep climbing: the nose drops gently until the speed is back (the floor guard still wins).
-        if (_speed < MinSpeed + LowSpeedBand && !(guarded && low))
-            ClimbLimit(climb, LowSpeedMaxClimb, LowSpeedResponse, ref pitch);
+        // Too slow to keep climbing (or, high up, too little power even at the minimum speed): the nose drops
+        // gently until the speed is back (the floor guard still wins).
+        float maxClimbSine = LowSpeedMaxClimbSine;
+        if (maxClimbSine < 1f && !(guarded && low))
+            ClimbLimit(climb, MathF.Asin(maxClimbSine), LowSpeedResponse, ref pitch, ref yaw);
 
         // A damaged wing drags the plane into a roll toward its side.
         roll += ((1f - _rightWing) - (1f - _leftWing)) * WingRollDrift;
@@ -259,13 +285,11 @@ public sealed class FlightModel
         forward = Vector3.Transform(-Vector3.UnitZ, _orientation);
 
         _throttle = input.Throttle;
-        _speed = Math.Clamp(_speed + (Thrust() - forward.Y * Gravity * GravityScale) * dt, MinSpeed, DiveMaxSpeed);
+        _speed = Math.Clamp(_speed + (Thrust(_speed) - forward.Y * Gravity * GravityScale) * dt, MinSpeed, DiveMaxSpeed);
 
         _position += forward * (_speed * dt);
-        // Backstop only: the guard steering normally keeps the plane well inside these.
-        _position.Y = Math.Clamp(_position.Y, FloorAltitude, CeilingAltitude);
-        if (_position.Y >= CeilingAltitude && forward.Y > 0f)
-            _orientation = Quaternion.Normalize(LevelNose(forward) * _orientation); // so it flies along the ceiling, not into it
+        // Backstop only: the guard steering normally keeps the plane well inside these. No ceiling.
+        _position.Y = MathF.Max(_position.Y, FloorAltitude);
         _position.X = Math.Clamp(_position.X, -AreaHalfSize, AreaHalfSize);
         _position.Z = Math.Clamp(_position.Z, -AreaHalfSize, AreaHalfSize);
     }
@@ -308,21 +332,6 @@ public sealed class FlightModel
         }
     }
 
-    /// <summary>World rotation that brings the nose to the horizon about the horizontal axis across it.</summary>
-    private Quaternion LevelNose(Vector3 forward)
-    {
-        Vector3 horizontal = new(forward.X, 0f, forward.Z);
-        if (horizontal.LengthSquared() < 1e-8f)
-        {
-            Vector3 up = Vector3.Transform(Vector3.UnitY, _orientation);
-            horizontal = new Vector3(-up.X, 0f, -up.Z); // straight up: pushed over, so it ends upright
-        }
-        horizontal = Vector3.Normalize(horizontal);
-        Vector3 axis = Vector3.Cross(forward, horizontal);
-        float angle = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
-        return axis.LengthSquared() > 1e-8f ? Quaternion.CreateFromAxisAngle(Vector3.Normalize(axis), angle) : Quaternion.Identity;
-    }
-
     /// <summary>A direction to steer to instead of the pilot when near the floor or the border.</summary>
     private bool GuardDirection(Vector3 forward, out Vector3 direction, out bool low)
     {
@@ -361,49 +370,65 @@ public sealed class FlightModel
     }
 
     /// <summary>
-    /// The throttle's pull and the drag (m/s^2), without gravity: toward the throttle's speed at
-    /// <see cref="SpeedResponse"/>, adding at most <see cref="MaxThrustAcceleration"/> (less with a damaged
-    /// engine); above the engine's level max only the weak <see cref="OverspeedDrag"/> slows it further.
+    /// The throttle's pull and the drag (m/s^2) at <paramref name="speed"/>, without gravity: toward the
+    /// throttle's speed at <see cref="SpeedResponse"/> (never above <see cref="LevelMaxSpeed"/>), adding at most
+    /// <see cref="ClimbPower"/> (less with a damaged engine and with height; above <see cref="PowerAltitude"/>
+    /// it is negative, a loss at any speed); above the level max only the weak <see cref="OverspeedDrag"/> slows it.
     /// </summary>
-    private float Thrust()
+    private float Thrust(float speed)
     {
-        float maxSpeed = MaxSpeedNow;
+        float maxSpeed = LevelMaxSpeed(_engine, _position.Y);
         float target = MathF.Min(SpeedForThrottle(_throttle), maxSpeed);
-        if (_speed > maxSpeed)
-            return SpeedResponse * (target - maxSpeed) - OverspeedDrag * (_speed - maxSpeed);
-        return MathF.Min(SpeedResponse * (target - _speed), MaxThrustAcceleration * maxSpeed / MaxSpeed);
+        float pull = speed > maxSpeed
+            ? SpeedResponse * (target - maxSpeed) - OverspeedDrag * (speed - maxSpeed)
+            : SpeedResponse * (target - speed);
+        return MathF.Min(pull, ClimbPower(_engine, _position.Y));
     }
 
-    /// <summary>Largest climb angle (rad) allowed at the current speed: level at <see cref="MinSpeed"/>,
-    /// its sine growing in proportion up to 90 degrees at <see cref="LowSpeedBand"/> above it.</summary>
-    private float LowSpeedMaxClimb => MathF.Asin(Math.Clamp((_speed - MinSpeed) / LowSpeedBand, 0f, 1f));
-
-    /// <summary>Largest climb angle (rad) allowed at the current altitude: 90 degrees at the bottom
-    /// of the ceiling band, then its sine (the share of the speed going up) shrinks in proportion
-    /// to the height left, 0 at the ceiling: the last meters are approached ever more slowly.</summary>
-    private float MaxClimb => MathF.Asin(Math.Clamp((CeilingAltitude - _position.Y) / CeilingBand, 0f, 1f));
+    /// <summary>Sine of the largest climb allowed at the current speed: 0 (level) at <see cref="MinSpeed"/>,
+    /// growing in proportion up to 1 (90 degrees) at <see cref="LowSpeedBand"/> above it. When the engine lacks
+    /// power even at the minimum speed (high above <see cref="PowerAltitude"/>, or a dead engine near it), lower
+    /// by that loss over gravity: at the minimum speed the plane glides down just steeply enough to keep it.</summary>
+    private float LowSpeedMaxClimbSine
+    {
+        get
+        {
+            float loss = MathF.Min(0f, Thrust(MinSpeed));
+            return Math.Clamp((_speed - MinSpeed) / LowSpeedBand + loss / (Gravity * GravityScale), -1f, 1f);
+        }
+    }
 
     /// <summary>
-    /// Climb limit (the ceiling's and the low speed's): the pitch command (whoever gives it) may raise
-    /// the climb only toward <paramref name="maxClimb"/>, a steeper climb is eased down to it with time
-    /// constant <paramref name="response"/>, so the plane levels out smoothly at the ceiling and flies
-    /// level along it at full up-stick. Lowering the nose is never limited.
+    /// Climb limit (the low speed's): the pitch command (whoever gives it) may raise the climb only toward
+    /// <paramref name="maxClimb"/>, a steeper climb is eased down to it with time constant
+    /// <paramref name="response"/>, so the nose drops smoothly. Lowering the nose is never limited.
+    /// Yaw raises the nose too when banked (steeply banked, more than pitch): its share is limited first.
     /// </summary>
-    private void ClimbLimit(float climb, float maxClimb, float response, ref float pitch)
+    private void ClimbLimit(float climb, float maxClimb, float response, ref float pitch, ref float yaw)
     {
         float wantedRate = (maxClimb - climb) / response;
         // Climb rate per unit of pitch stick: the nose moves toward the plane's up, so inverted a pull
         // lowers it (up.Y / cos(climb) is about cos(bank); straight up, a push brings the nose over).
         float tail = DeadTailResponse + (1f - DeadTailResponse) * _tail;
         float upY = Vector3.Transform(Vector3.UnitY, _orientation).Y;
+        float rightY = Vector3.Transform(Vector3.UnitX, _orientation).Y;
         float cosClimb = MathF.Cos(climb);
+        // Climb rate per unit of yaw: the nose moves toward the plane's right (right.Y / cos(climb) is about -sin(bank)).
+        float yawGain = cosClimb > 1e-3f ? YawRate * tail * Math.Clamp(rightY / cosClimb, -1f, 1f) : 0f;
+        float yawRate = yaw * yawGain, yawAllowed = MathF.Max(wantedRate, 0f);
+        if (yawRate > yawAllowed)
+        {
+            yaw = yawAllowed / yawGain;
+            yawRate = yawAllowed;
+        }
+        wantedRate -= yawRate;
         float gain = PitchRate * tail * (cosClimb > 1e-3f ? Math.Clamp(upY / cosClimb, -1f, 1f) : 1f);
         if (gain > 1e-3f)
             pitch = MathF.Min(pitch, wantedRate / gain);
         else if (gain < -1e-3f)
             pitch = MathF.Max(pitch, wantedRate / gain);
         pitch = Math.Clamp(pitch, -1f, 1f);
-        // Hands off keeps no climb above the limit (through the ceiling, or too steep for the speed).
+        // Hands off keeps no climb above the limit (too steep for the speed).
         _holdClimb = MathF.Min(_holdClimb, maxClimb);
     }
 

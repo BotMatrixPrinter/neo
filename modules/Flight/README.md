@@ -42,13 +42,29 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
   `OverspeedDrag`) acts, so a full-throttle dive builds speed up to 85 m/s (`DiveMaxSpeed`, the
   cap); back in level flight the speed settles at the throttle's again. Always 25..85 m/s.
   The plane flies where its nose points: no stall, no spin, no slip.
-- **Too slow to climb**: below 35 m/s (`MinSpeed` + `LowSpeedBand`) the climb is limited
-  like at the ceiling: the sine of the largest climb allowed is the share of that 10 m/s band
-  left (level at 25 m/s, free at 35 m/s); a steeper climb, whoever commands it (sticks, mouse
-  aim, hands off, border guard), is eased down (time constant 0.5 s, `LowSpeedResponse`): the
-  nose drops gently until the plane has speed again, so a full-throttle climb settles at a
-  gentle climb near the minimum speed. Lowering the nose is never limited; the floor guard's
-  pull-up is never limited either.
+- **Height** (no hard ceiling): the engine loses power as the plane climbs. The share lost is
+  (h / 1000 m)^4 (`AltitudePowerLoss`, `PowerAltitude` = 1000 m): almost nothing low down
+  (0.2% at 200 m, 2.6% at 400 m, 13% at 600 m), most of it in the last few hundred meters,
+  smoothly, and it keeps growing above. The throttle's most added acceleration
+  (`ClimbPower`) is 3 m/s² x the engine's share x (1 - that loss), and the level max speed
+  (`LevelMaxSpeed`) falls from 60 m/s at the ground to 40 m/s (`PowerAltitudeSpeed`, about
+  cruise) at 1000 m. So full-throttle climbs get slower with height and level off around
+  1000 m by themselves: there full throttle only holds level flight at about cruise, with
+  nothing left to climb, and any climb bleeds speed until the low-speed limit drops the nose.
+  Above 1000 m (reachable briefly by zooming up with speed, to about 1045 m from 980 m at
+  41 m/s) the power is a loss even in level flight: the plane slows to the minimum speed
+  and then glides down just steeply enough to keep it, back to 1000 m (hands off it keeps
+  that glide, below 1000 m). No clamp, no bounce. Up high the overspeed drag starts at the
+  lower level max, so dives build speed a little slower there.
+- **Too slow to climb**: below 35 m/s (`MinSpeed` + `LowSpeedBand`) the climb is limited:
+  the sine of the largest climb allowed is the share of that 10 m/s band left (level at
+  25 m/s, free at 35 m/s), lowered when the engine lacks power even at the minimum speed
+  (above 1000 m, or a dead engine near it) by that loss over gravity, so the plane glides
+  down instead; a steeper climb, whoever commands it (sticks, mouse aim, hands off, border
+  guard), is eased down (time constant 0.5 s, `LowSpeedResponse`), its yaw share first
+  (steeply banked, yaw raises the nose too): the nose drops gently until the plane has speed
+  again, so a full-throttle climb settles at a gentle climb near the minimum speed. Lowering
+  the nose is never limited; the floor guard's pull-up is never limited either.
 - **Sticks** (no `HasAim`): `Pitch`, `Roll`, `Yaw` (-1..1) are body rates of 70, 180 and
   40 deg/s; commands are smoothed (15/s) so rates are snappy but never jump. A banked plane
   also turns about world up (30 deg/s at 90 degrees of bank).
@@ -61,7 +77,7 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
   stick's lag adds just after the release are eased back (same time constant, capped at 0.6
   pitch stick, only while the wings are within 90 degrees of level). No yaw: the heading is
   kept (a bank still turns the plane while it rolls out). Any stick outside the dead zone
-  takes over at once; levelling resumes 0.25 s after letting go. The floor, ceiling and border
+  takes over at once; levelling resumes 0.25 s after letting go. The floor and border
   guards still win; once clear, hands off keeps the climb or dive the guard left (after a floor
   pull-up at least level, never a dive), so a plane let go in a dive dives until the floor
   guard pulls it up.
@@ -71,16 +87,6 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
 - **Floor**: below 20 m is never reached. When the plane is within 40 m of the floor plus
   2.5 s of its current descent, the autopilot takes over and climbs gently (about 20
   degrees) until clear. A hard clamp at 20 m is only a backstop.
-- **Ceiling**: no plane flies above 1000 m (`CeilingAltitude`); the floor in reverse. In the
-  50 m band below it (`CeilingBand`, from 950 m, `CeilingEaseStart`) the share of the speed
-  going up may be at most the share of the band left (1 at 950 m, 0 at 1000 m): whoever
-  commands the pitch (sticks, mouse aim, hands off, the guards, any plane), a climb above
-  that is eased off (time constant 0.25 s, `CeilingResponse`, through the usual stick
-  smoothing), so the plane levels out just below 1000 m with no bounce, and full up-stick
-  there flies level along it (banked, a level turn). Lowering the nose is never limited: the
-  pilot can dive away at once, and below 950 m nothing changes. A climb held hands off that
-  would go through the ceiling is levelled at it. A hard clamp at 1000 m (which also levels
-  the nose) is only a backstop, for a plane too slow in pitch (a dead tail) to level in the band.
 - **Border**: a 4 km x 4 km area centered on the origin (|x|, |z| <= 2000 m). Within 400 m
   of an edge and heading out, the autopilot turns back toward the origin, keeping a mild
   climb or dive. A hard clamp at the edge is only a backstop. The floor wins over the pilot,
@@ -90,8 +96,9 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
 
 Each plane keeps the latest part health from `PlaneDamageState` (0..1, 1 undamaged):
 
-- **Engine**: the level max speed (`MaxSpeedNow`) is `MaxSpeed` times 0.6 + 0.4 x health
-  (60 m/s healthy, 36 m/s dead), and the throttle's most added acceleration is scaled the same.
+- **Engine**: the level max speed (`MaxSpeedNow`, at the ground) is `MaxSpeed` times 0.6 + 0.4 x health
+  (60 m/s healthy, 36 m/s dead), and the throttle's most added acceleration is scaled the same,
+  on top of the loss to height (a dead engine levels off lower, about 980 m).
   A plane faster than that slows down to it (by the overspeed drag, gradually); it climbs with
   less speed and dives slower (the overspeed drag acts above its lower max), still capped at 85 m/s.
 - **Wings**: a damaged wing adds roll stick toward its side, 0.4 x (right damage - left
@@ -109,7 +116,12 @@ Each plane keeps the latest part health from `PlaneDamageState` (0..1, 1 undamag
 
 `Tests/FlightModuleTests.cs`, with a fake bus (`TestBus`) that publishes fake
 `ControlInput`s: start state, speeds stay in 25..85 (cruise, max, min, dives, climbs,
-random flying), gravity (a 60 degree full-throttle climb only bleeds speed, down to near the
+random flying), height (the power curve is full at the ground, smooth, 0 climb power and
+about 40 m/s level at 1000 m, a loss above, no ceiling constant left; low altitude unchanged;
+full-throttle climbs, player and bot, slow with height and level off around 1000 m, a dead
+engine slower and lower; a fast zoom passes 1000 m, then still pulling up or hands off sinks
+back with no bounce; level flight at 1000 m holds about cruise, a climb there only bleeds
+speed), gravity (a 60 degree full-throttle climb only bleeds speed, down to near the
 minimum, then the climb is eased to a gentle one; a gentle climb keeps most of it; a slow plane,
 by stick or aim, cannot hold a steep climb, the nose drops gently and climbs again with
 throttle; a dive builds speed past 60 up to the 85 cap, level flight settles back at the
@@ -118,10 +130,7 @@ than pitch and yaw, hands-off levelling (banks settle in 2 to 3 s without oversh
 wobble; climbs and dives, banked or not, keep their pitch angle within a degree and their
 heading; the short delay and dead zone, sticks override at once, inverted rights itself the
 shorter way, a steep dive is kept until the floor guard pulls up, never diving back),
-floor and border hold, the ceiling (climbs of 20, 45 and 80 degrees eased off smoothly and
-levelled just below 1000 m, full up-stick flies level along it with no bounce or jitter and
-diving away is immediate, aim, inverted, dead tail, bots and random flying never above 1000 m,
-nothing changes below 950 m), determinism (with damage, downing and respawn), no allocations per
+floor and border hold, determinism (with damage, downing and respawn), no allocations per
 tick; eight planes start by team and are published every tick in id order, four planes fly
 from their own inputs (others hands off), the `Teams` helper, `PlaneState.Alive` with the
 old constructor, engine damage (lower level speed, slows down gradually to it, climbs and
