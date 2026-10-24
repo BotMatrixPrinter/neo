@@ -46,6 +46,25 @@ public sealed class BotPilot
     /// times as big. Aiming, firing and the choice of moves are not affected.
     /// </summary>
     public const float EvasionSkill = 0.75f;
+    /// <summary>
+    /// How well the bots aim, 1 = full (as before 2026-10-24). The aim error is 1 / skill times
+    /// larger and the lead estimate sloppier (its time of flight off by up to
+    /// <see cref="LeadSlop"/> × (1 - skill) / 0.25), so fewer bullets land. Firing rules and
+    /// evasion are not affected.
+    /// </summary>
+    public const float AimSkill = 0.75f;
+    /// <summary>With <see cref="AimSkill"/> 0.75, the lead's time of flight wanders by up to this share (more at lower skill, none at 1).</summary>
+    public const float LeadSlop = 0.15f;
+    /// <summary>
+    /// Upright flying: the steepest bank in a normal turn. A target below is reached by pushing
+    /// the nose down, not by rolling inverted; only a big change of direction downward (target
+    /// more than <see cref="InvertDive"/> below and more than 90 degrees off the nose, with
+    /// <see cref="DiveRoomAltitude"/> of room) and the split-S and roll-away roll further.
+    /// </summary>
+    public const float MaxBank = 80f * Deg;
+    public const float InvertDive = 60f * Deg;
+    /// <summary>Strongest push (negative pitch) used to bring the nose down to a target below.</summary>
+    public const float MaxPush = 0.6f;
     /// <summary>Bullet speed used for the lead point, m/s (plus the bot's own speed).</summary>
     public const float BulletSpeed = 450f;
     /// <summary>Fires only when the target is closer than this, m.</summary>
@@ -116,12 +135,10 @@ public sealed class BotPilot
     public const float ClimbAngle = 30f * Deg;
     /// <summary>Terrain ahead that needs a steeper climb than this to clear: it turns away as it climbs.</summary>
     public const float TurnAwayAngle = 20f * Deg;
-    /// <summary>Half size of the square area (Flight's), m.</summary>
-    public const float AreaHalfSize = 2000f;
-    /// <summary>Turns back toward the center within this distance of an edge when heading out, m.</summary>
-    public const float EdgeMargin = 600f;
-    /// <summary>Without a target: circles the center at this radius and altitude, m.</summary>
-    public const float CircleRadius = 700f;
+    /// <summary>Turns back toward the center within this distance of an edge (<see cref="WorldBounds.HalfSize"/>) when heading out, m: 0.3 of the half size (600 m of 2000, 300 m of 1000).</summary>
+    public const float EdgeMargin = 0.3f * WorldBounds.HalfSize;
+    /// <summary>Without a target: circles the center at this radius (0.35 of the half size: 700 m of 2000) and altitude, m.</summary>
+    public const float CircleRadius = 0.35f * WorldBounds.HalfSize;
     public const float CircleAltitude = 400f;
     /// <summary>Within this angle of the aim point the bot fine-aims with pitch and yaw instead of banking.</summary>
     public const float FineAngle = 12f * Deg;
@@ -145,6 +162,7 @@ public sealed class BotPilot
     private readonly float _evasionSkill;
     private readonly float _evadeReaction;
     private readonly float _evadeCooldown;
+    private readonly float _aimSkill;
 
     private Vector3 _seenAim;
     private bool _hasSeenAim;
@@ -174,12 +192,14 @@ public sealed class BotPilot
     private float _terrainSide;
 
     /// <param name="evasionSkill">How good it is at evading (see <see cref="EvasionSkill"/>).</param>
-    public BotPilot(int planeId, float evasionSkill = EvasionSkill)
+    /// <param name="aimSkill">How well it aims (see <see cref="AimSkill"/>).</param>
+    public BotPilot(int planeId, float evasionSkill = EvasionSkill, float aimSkill = AimSkill)
     {
         _id = planeId;
         _allies = Teams.IsAllies(planeId);
         _reaction = ReactionTime + ReactionSpread * Spread(planeId, 1);
-        _aimError = AimError + AimErrorSpread * Spread(planeId, 2);
+        _aimSkill = aimSkill;
+        _aimError = (AimError + AimErrorSpread * Spread(planeId, 2)) / aimSkill;
         _phase = (Spread(planeId, 3) + 1f) * MathF.PI;
         _breakSidePreference = Spread(planeId, 4) >= 0f ? 1f : -1f;
         _attackThrottle = AttackThrottle - AttackThrottleSpread * (Spread(planeId, 6) + 1f) * 0.5f;
@@ -207,7 +227,7 @@ public sealed class BotPilot
     /// <summary>Attacking time after an evasion before the next one, s.</summary>
     public float Cooldown => _evadeCooldown;
 
-    /// <summary>This bot's aim error, radians.</summary>
+    /// <summary>This bot's aim error, radians (its base error / <see cref="AimSkill"/>).</summary>
     public float AimErrorAngle => _aimError;
 
     /// <summary>What it did on the last <see cref="Fly"/>.</summary>
@@ -295,15 +315,16 @@ public sealed class BotPilot
         float throttle = _attackThrottle;
         bool fire = false;
 
-        if (NeedsClimb(in me, forward, out Vector3 climb))
+        bool turnBack = NeedsTurnBack(in me, forward, out Vector3 home);
+        if (NeedsClimb(in me, forward, turnBack, home, out Vector3 climb))
         {
             Mode = BotMode.Ground;
-            Steer(climb, in me, out pitch, out roll, out yaw);
+            Steer(climb, in me, false, out pitch, out roll, out yaw);
         }
-        else if (NeedsTurnBack(in me, forward, out Vector3 home))
+        else if (turnBack)
         {
             Mode = BotMode.Edge;
-            Steer(LimitClimb(home, in me), in me, out pitch, out roll, out yaw);
+            Steer(LimitClimb(home, in me), in me, false, out pitch, out roll, out yaw);
         }
         else if (_evade != BotMode.None)
         {
@@ -331,10 +352,12 @@ public sealed class BotPilot
             Mode = BotMode.Attack;
             ref readonly PlaneState t = ref states[target];
             // Lead point: where the target will be when the bullets get there.
+            // A sloppier estimate with less aim skill: its time of flight wanders a little.
             float bulletSpeed = BulletSpeed + me.Speed;
+            float slop = 1f + LeadSlop * (1f - _aimSkill) * 4f * MathF.Sin(time * 0.53f + 3f * _phase);
             float flight = best / bulletSpeed;
             Vector3 lead = t.Position + t.Velocity * flight;
-            flight = Vector3.Distance(lead, me.Position) / bulletSpeed;
+            flight = Vector3.Distance(lead, me.Position) / bulletSpeed * slop;
             lead = t.Position + t.Velocity * flight;
 
             // Aim error: a small offset wandering slowly around the lead point.
@@ -352,7 +375,8 @@ public sealed class BotPilot
                 _seenAim += (lead - _seenAim) * MathF.Min(1f, dt / _reaction);
 
             Vector3 aim = _seenAim - me.Position;
-            Steer(LimitClimb(aim, in me), in me, out pitch, out roll, out yaw);
+            // Rolling inverted only for a big change of direction downward, with room below.
+            Steer(LimitClimb(aim, in me), in me, me.Position.Y - _groundAhead > DiveRoomAltitude, out pitch, out roll, out yaw);
 
             float aimLength = aim.Length();
             bool linedUp = aimLength > 1e-3f && Vector3.Dot(aim / aimLength, forward) > MathF.Cos(FireCone);
@@ -365,11 +389,11 @@ public sealed class BotPilot
         {
             Mode = BotMode.Circle;
             throttle = CircleThrottle;
-            Steer(LimitClimb(CirclePoint(me.Position) - me.Position, in me), in me, out pitch, out roll, out yaw);
+            Steer(LimitClimb(CirclePoint(me.Position) - me.Position, in me), in me, false, out pitch, out roll, out yaw);
         }
 
         if (Mode != BotMode.Ground)
-            GuardClimb(in me, forward, ref pitch, ref roll);
+            GuardClimb(in me, forward, _evade != BotMode.None && Mode == _evade, ref pitch, ref roll);
         if (target < 0)
             _hasSeenAim = false;
         return new ControlInput(_id, pitch, roll, yaw, throttle, fire, false, Vector3.Zero);
@@ -593,18 +617,22 @@ public sealed class BotPilot
     }
 
     /// <summary>
-    /// The nose above <see cref="MaxClimb"/> (say, pulling up toward a target behind): wings
-    /// near level, push it down; banked, bank past 90 degrees so the pull brings it down.
+    /// The nose above <see cref="MaxClimb"/> (say, pulling up toward a target behind): pull
+    /// less, or push it down, staying upright; only in an evasion (<paramref name="evading"/>),
+    /// banked, it banks past 90 degrees so the pull brings it down.
     /// </summary>
-    private static void GuardClimb(in PlaneState me, Vector3 forward, ref float pitch, ref float roll)
+    private static void GuardClimb(in PlaneState me, Vector3 forward, bool evading, ref float pitch, ref float roll)
     {
         float elev = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
         float maxElev = MaxClimb(in me);
         if (elev <= maxElev + 3f * Deg)
             return;
         float bank = Bank(me.Orientation);
-        if (MathF.Abs(bank) <= 45f * Deg)
-            pitch = MathF.Min(pitch, Math.Clamp((maxElev - elev) * 4f, -1f, 1f));
+        if (!evading || MathF.Abs(bank) <= 45f * Deg)
+        {
+            if (MathF.Abs(bank) < 90f * Deg)
+                pitch = MathF.Min(pitch, Math.Clamp((maxElev - elev) * 4f / MathF.Max(MathF.Cos(bank), 0.5f), -1f, 1f));
+        }
         else if (MathF.Abs(bank) < 110f * Deg)
             roll = Math.Clamp(WrapAngle(MathF.Sign(bank) * 120f * Deg - bank) * 3f, -1f, 1f);
     }
@@ -638,9 +666,11 @@ public sealed class BotPilot
     /// Too low over the terrain under it or ahead (every second over <see cref="TerrainLookahead"/>
     /// s along its path; its descent counted for <see cref="GroundLookahead"/> s): climb at
     /// <see cref="ClimbAngle"/>; when the terrain ahead rises steeper than
-    /// <see cref="TurnAwayAngle"/>, turn away toward the lower side as well.
+    /// <see cref="TurnAwayAngle"/>, turn away toward the lower side as well. Near the edge and
+    /// heading out (<paramref name="turnBack"/>: the walls beyond it), it climbs turning back
+    /// toward the center (<paramref name="home"/>) instead.
     /// </summary>
-    private bool NeedsClimb(in PlaneState me, Vector3 forward, out Vector3 climb)
+    private bool NeedsClimb(in PlaneState me, Vector3 forward, bool turnBack, Vector3 home, out Vector3 climb)
     {
         Vector3 p = me.Position;
         Vector3 flat = Flat(me.Velocity, forward);
@@ -661,7 +691,12 @@ public sealed class BotPilot
             _terrainSide = 0f;
             return false;
         }
-        if (slope > MathF.Tan(TurnAwayAngle))
+        if (turnBack)
+        {
+            _terrainSide = 0f;
+            flat = Vector3.Normalize(new Vector3(home.X, 0f, home.Z));
+        }
+        else if (slope > MathF.Tan(TurnAwayAngle))
         {
             // Turn away, to the side with the lower terrain (kept until clear).
             Vector3 right = new(-flat.Z, 0f, flat.X);
@@ -687,7 +722,7 @@ public sealed class BotPilot
 
     private static bool NeedsTurnBack(in PlaneState me, Vector3 forward, out Vector3 home)
     {
-        float limit = AreaHalfSize - EdgeMargin;
+        float limit = WorldBounds.HalfSize - EdgeMargin;
         Vector3 p = me.Position;
         bool outX = MathF.Abs(p.X) > limit && p.X * forward.X > 0f;
         bool outZ = MathF.Abs(p.Z) > limit && p.Z * forward.Z > 0f;
@@ -711,10 +746,15 @@ public sealed class BotPilot
     }
 
     /// <summary>
-    /// Stick toward a world direction: far off the nose, bank so the target is "above" the
-    /// cockpit and pull; near the nose, fine-aim with pitch and yaw.
+    /// Stick toward a world direction, upright by default: far off the nose, bank toward it
+    /// (at most <see cref="MaxBank"/>) and pull, or, when it is below the wings, push the nose
+    /// down to it instead of rolling inverted; near the nose, fine-aim with pitch and yaw. Only
+    /// when <paramref name="mayInvert"/> and the direction is a big change downward (more than
+    /// <see cref="InvertDive"/> below, more than 90 degrees off the nose) does it roll the lift
+    /// onto it, inverted if need be. A wings-level term rolls it back toward upright whenever
+    /// it is banked past <see cref="MaxBank"/> and not in such a move (also in fine aim).
     /// </summary>
-    private static void Steer(Vector3 direction, in PlaneState me, out float pitch, out float roll, out float yaw)
+    private static void Steer(Vector3 direction, in PlaneState me, bool mayInvert, out float pitch, out float roll, out float yaw)
     {
         Vector3 local = Local(direction, me.Orientation);
         float length = local.Length();
@@ -725,26 +765,65 @@ public sealed class BotPilot
         }
         local /= length;
         float off = MathF.Acos(Math.Clamp(-local.Z, -1f, 1f));
+        float dive = -MathF.Asin(Math.Clamp(direction.Y / length, -1f, 1f));
+        bool invert = mayInvert && off > 90f * Deg && dive > InvertDive;
         // Far behind: turn around to one side (a level turn), not over the top in a loop.
         if (local.Z > 0.5f && MathF.Abs(local.X) < 0.3f)
             local.X = local.X >= 0f ? 0.3f : -0.3f;
 
-        // Bank and pull: roll the lift vector onto the target, pull once it is about there.
+        // Bank and pull: roll the lift vector toward the target, pull once it is about there.
+        float bank = Bank(me.Orientation);
         float liftAngle = MathF.Atan2(local.X, local.Y); // 0: straight "up" in the cockpit; positive: to the right
-        float bankRoll = Math.Clamp(liftAngle * 2.5f, -1f, 1f);
-        float bankPitch = MathF.Max(0f, MathF.Cos(liftAngle));
+        float wanted = WrapAngle(bank + liftAngle); // the bank that puts the lift on the target
+        float bankPitch;
         float bankYaw = Math.Clamp(local.X * 1.5f, -1f, 1f) * 0.5f;
+        if (invert)
+            bankPitch = MathF.Max(0f, MathF.Cos(liftAngle));
+        else
+        {
+            // Upright: a target below the wing line is mirrored above it (bank toward its side,
+            // push down to it); a target behind: the steepest bank toward its side.
+            if (off > 90f * Deg)
+                wanted = MathF.Sign(local.X) * MaxBank;
+            else if (MathF.Abs(wanted) > 90f * Deg)
+                wanted = MathF.Sign(wanted) * (MathF.PI - MathF.Abs(wanted));
+            wanted = Math.Clamp(wanted, -MaxBank, MaxBank);
+            // Pull (or push) by the nose's wanted motion seen from the cockpit: up/down toward the
+            // target's elevation (through cos bank), and sideways toward its heading (through sin bank).
+            Vector3 forward = Vector3.Transform(-Vector3.UnitZ, me.Orientation);
+            Vector3 flat = Flat(forward, -Vector3.UnitZ);
+            Vector3 toward = Flat(direction, forward);
+            float heading = MathF.Atan2(toward.X * -flat.Z + toward.Z * flat.X, Vector3.Dot(toward, flat)); // positive: to the right
+            float rise = Math.Clamp((-dive - MathF.Asin(Math.Clamp(forward.Y, -1f, 1f))) * 8f, -1f, 1f);
+            float turn = Math.Clamp(heading * 4f, -1f, 1f);
+            bankPitch = Math.Clamp(MathF.Cos(bank) * rise + MathF.Sin(bank) * turn, -MaxPush, 1f);
+            // The rudder does the rest (steeply banked, it moves the nose up and down).
+            bankYaw = Math.Clamp(MathF.Cos(bank) * turn - MathF.Sin(bank) * rise, -1f, 1f) * 0.5f;
+        }
+        float bankRoll = Math.Clamp(WrapAngle(wanted - bank) * 2.5f, -1f, 1f);
 
-        // Fine aim: small corrections with pitch and yaw, roll fading out.
+        // Fine aim: small corrections with pitch and yaw, roll fading out, but never left past MaxBank.
         float ahead = MathF.Max(-local.Z, 1e-3f);
         float finePitch = Math.Clamp(MathF.Atan2(local.Y, ahead) * 4f, -1f, 1f);
         float fineYaw = Math.Clamp(MathF.Atan2(local.X, ahead) * 4f, -1f, 1f);
-        float fineRoll = bankRoll * Math.Clamp(off / FineAngle, 0f, 1f);
+        float fineRoll = Math.Clamp(bankRoll * Math.Clamp(off / FineAngle, 0f, 1f) + WingsLevel(bank), -1f, 1f);
 
         float w = Math.Clamp((off - 0.5f * FineAngle) / (0.5f * FineAngle), 0f, 1f);
         pitch = finePitch + (bankPitch - finePitch) * w;
         roll = fineRoll + (bankRoll - fineRoll) * w;
         yaw = fineYaw + (bankYaw - fineYaw) * w;
+    }
+
+    /// <summary>
+    /// Roll toward upright for a bank past <see cref="MaxBank"/> (the shorter way back to it),
+    /// stronger the further from upright: full when inverted.
+    /// </summary>
+    private static float WingsLevel(float bank)
+    {
+        float excess = MathF.Abs(bank) - MaxBank;
+        if (excess <= 0f)
+            return 0f;
+        return -MathF.Sign(bank) * Math.Clamp(excess * 3f + excess / (MathF.PI - MaxBank), 0f, 1f);
     }
 
     private static Vector3 Local(Vector3 world, Quaternion orientation)

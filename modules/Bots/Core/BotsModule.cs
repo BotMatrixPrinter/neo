@@ -24,12 +24,13 @@ public sealed class BotsModule : IModule, IMessageHandler<PlaneState>
     }
 
     /// <param name="evasionSkill">The bots' evasion skill (see <see cref="BotPilot.EvasionSkill"/>).</param>
-    public BotsModule(float evasionSkill)
+    /// <param name="aimSkill">The bots' aim skill (see <see cref="BotPilot.AimSkill"/>).</param>
+    public BotsModule(float evasionSkill, float aimSkill = BotPilot.AimSkill)
     {
         for (int id = 0; id < Pilots.PlaneCount; id++)
         {
             if (Pilots.IsBot(id))
-                _pilots[id] = new BotPilot(id, evasionSkill);
+                _pilots[id] = new BotPilot(id, evasionSkill, aimSkill);
         }
     }
 
