@@ -529,8 +529,7 @@ public class GunsModuleTests
         bus.Target.Handle(in miss);
         guns.Tick(in OneStep);
 
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 6000; i++) // 100 s: far more shots than the pool holds
+        void Step()
         {
             for (int p = 0; p < Teams.PlaneCount; p++)
             {
@@ -541,12 +540,25 @@ public class GunsModuleTests
             bus.Target.Handle(in miss);
             guns.Tick(in OneStep);
         }
+
+        // Warm up the whole step (pool wraps, hits, overheat) so the runtime has compiled
+        // everything before measuring; the test project also turns tiered compilation off,
+        // so no method is re-compiled (and nothing allocated by the JIT) mid-measurement.
+        const int warmUp = 600;
+        for (int i = 0; i < warmUp; i++)
+            Step();
+
+        // The csproj setting must reach the test host, or JIT tier-ups could allocate below.
+        Assert.Equal("false", AppContext.GetData("System.Runtime.TieredCompilation"));
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 6000; i++) // 100 s: far more shots than the pool holds
+            Step();
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
         for (int p = 0; p < Teams.PlaneCount; p++)
             Assert.True(guns.StateOf(p).ShotsFired > 0, $"plane {p} fired");
         Assert.True(bus.Damages > GunsModule.PoolSize, $"{bus.Damages} balloon hits");
         Assert.True(bus.PlaneHits > GunsModule.PoolSize, $"{bus.PlaneHits} plane hits");
-        Assert.Equal(6001 * Teams.PlaneCount, bus.States);
+        Assert.Equal((1 + warmUp + 6000) * Teams.PlaneCount, bus.States);
         Assert.Equal(GunsModule.PoolSize, guns.Bullets.Length);
     }
 

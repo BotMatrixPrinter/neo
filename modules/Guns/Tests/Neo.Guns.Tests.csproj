@@ -4,6 +4,8 @@
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- No tier-up re-compilation mid-test: TickDoesNotAllocateAndReusesThePool measures exact bytes. -->
+    <TieredCompilation>false</TieredCompilation>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
