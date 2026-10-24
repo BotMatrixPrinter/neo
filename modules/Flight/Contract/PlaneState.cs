@@ -35,10 +35,10 @@ public readonly struct PlaneState
     /// <summary>Body to world rotation (unit). Body axes: +X right, +Y up, -Z forward.</summary>
     public Quaternion Orientation { get; }
 
-    /// <summary>World velocity, m/s (along the nose).</summary>
+    /// <summary>World velocity, m/s: along the nose at <see cref="Speed"/>, plus a collision's fading knock while it lasts.</summary>
     public Vector3 Velocity { get; }
 
-    /// <summary>Airspeed, m/s (the length of <see cref="Velocity"/>).</summary>
+    /// <summary>Airspeed along the nose, m/s (the length of <see cref="Velocity"/> except just after a collision).</summary>
     public float Speed { get; }
 
     /// <summary>Throttle in use, 0..1.</summary>

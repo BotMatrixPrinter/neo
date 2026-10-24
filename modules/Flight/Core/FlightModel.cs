@@ -12,7 +12,8 @@ namespace Neo.Flight;
 /// <see cref="AreaHalfSize"/> square by steering it gently away. No hard ceiling: the engine loses
 /// power as the plane climbs, until at <see cref="PowerAltitude"/> full throttle only holds level
 /// flight, so climbs level off there by themselves. Damage slows it, drags it into a roll and weakens its tail; a downed plane falls
-/// to the ground until it respawns.
+/// to the ground until it respawns. A collision (<see cref="ApplyImpulse"/>) shoves it aside and sets it spinning briefly, both
+/// fading over about a second.
 /// Deterministic; Step does not allocate.
 /// </summary>
 public sealed class FlightModel
@@ -98,6 +99,11 @@ public sealed class FlightModel
     /// <summary>Height of the ground (World's GroundY): a downed plane stops here.</summary>
     public const float GroundAltitude = 0f;
 
+    /// <summary>Time constant (s) with which a collision's knock velocity and spin fade: about 4% is left after 1 s.</summary>
+    public const float KnockTimeConstant = 0.3f;
+    /// <summary>A knock or spin smaller than this (m/s, rad/s) is gone: the plane is back to normal flight.</summary>
+    public const float KnockRest = 0.05f;
+
     private const float Deg = MathF.PI / 180f;
 
     private Vector3 _position;
@@ -112,6 +118,10 @@ public sealed class FlightModel
     private bool _alive = true;
     private bool _grounded;
     private bool _repairing;
+    /// <summary>A collision's shove (world m/s), on top of the flight along the nose; fades with <see cref="KnockTimeConstant"/>.</summary>
+    private Vector3 _knock;
+    /// <summary>A collision's spin (body rad/s: x pitch, y yaw, z roll, right-handed, +Z back), on top of the controls; fades the same.</summary>
+    private Vector3 _kick;
 
     public int PlaneId { get; }
 
@@ -187,7 +197,47 @@ public sealed class FlightModel
     public void SetRepairing(bool repairing) => _repairing = repairing;
 
     /// <summary>The plane is shot down: it falls (nose down, slow spin) to the ground and stays there.</summary>
-    public void Destroy() => _alive = false;
+    public void Destroy()
+    {
+        _alive = false;
+        _knock = _kick = Vector3.Zero;
+    }
+
+    /// <summary>
+    /// A collision's bounce (Collisions' <c>CollisionImpulse</c>): moves the plane by <paramref name="separation"/> at
+    /// once (inside the floor and border), changes its speed by the part of <paramref name="velocityChange"/> along the
+    /// nose (within <see cref="MinSpeed"/>..<see cref="DiveMaxSpeed"/>) and keeps the rest (sideways, plus what the
+    /// limits cut off) as a knock velocity on top of its flight; adds <paramref name="angularKick"/> (body rad/s: x pitch,
+    /// y yaw, z roll) to its turn rates. Knock and spin fade with <see cref="KnockTimeConstant"/>. Ignored when the
+    /// plane is down or any value is not finite.
+    /// </summary>
+    public void ApplyImpulse(Vector3 velocityChange, Vector3 angularKick, Vector3 separation)
+    {
+        if (!_alive || !Finite(velocityChange) || !Finite(angularKick) || !Finite(separation))
+            return;
+        _position += separation;
+        ClampToArea();
+        Vector3 forward = Forward;
+        float speed = Math.Clamp(_speed + Vector3.Dot(velocityChange, forward), MinSpeed, DiveMaxSpeed);
+        _knock += velocityChange - forward * (speed - _speed);
+        _speed = speed;
+        _kick += angularKick;
+    }
+
+    /// <summary>The collision knock still on top of the flight along the nose (world m/s); zero in normal flight.</summary>
+    public Vector3 Knock => _knock;
+    /// <summary>The collision spin still on top of the controls (body rad/s: x pitch, y yaw, z roll); zero in normal flight.</summary>
+    public Vector3 Kick => _kick;
+
+    private static bool Finite(Vector3 v) => float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
+
+    /// <summary>Backstop only: the guard steering normally keeps the plane well inside these. No ceiling.</summary>
+    private void ClampToArea()
+    {
+        _position.Y = MathF.Max(_position.Y, FloorAltitude);
+        _position.X = Math.Clamp(_position.X, -AreaHalfSize, AreaHalfSize);
+        _position.Z = Math.Clamp(_position.Z, -AreaHalfSize, AreaHalfSize);
+    }
 
     /// <summary>Back in the fight: at its team's start point, level, at full speed, undamaged.</summary>
     public void Respawn()
@@ -199,6 +249,7 @@ public sealed class FlightModel
         _pitchCmd = _rollCmd = _yawCmd = 0f;
         _handsOffTime = 0f;
         _holdClimb = 0f;
+        _knock = _kick = Vector3.Zero;
         Place(MaxSpeed);
     }
 
@@ -216,7 +267,8 @@ public sealed class FlightModel
     public float Speed => _speed;
     public float Throttle => _throttle;
     public Vector3 Forward => Vector3.Transform(-Vector3.UnitZ, _orientation);
-    public Vector3 Velocity => _grounded ? Vector3.Zero : Forward * _speed;
+    /// <summary>World velocity: along the nose at <see cref="Speed"/>, plus a collision's <see cref="Knock"/> while it lasts.</summary>
+    public Vector3 Velocity => _grounded ? Vector3.Zero : Forward * _speed + _knock;
 
     public PlaneState State => new(PlaneId, _position, _orientation, Velocity, _speed, _throttle, _alive);
 
@@ -287,6 +339,10 @@ public sealed class FlightModel
         Quaternion body = Quaternion.CreateFromAxisAngle(Vector3.UnitX, _pitchCmd * PitchRate * tail * dt)
             * Quaternion.CreateFromAxisAngle(Vector3.UnitZ, -_rollCmd * RollRate * dt)
             * Quaternion.CreateFromAxisAngle(Vector3.UnitY, -_yawCmd * YawRate * tail * dt);
+        // A collision's spin turns the plane on top of that (the pilot or hands off then works against it).
+        float kick = _kick.Length();
+        if (kick > 0f)
+            body *= Quaternion.CreateFromAxisAngle(_kick / kick, kick * dt);
         Quaternion q = _orientation * body;
         float rightY = Vector3.Transform(Vector3.UnitX, q).Y;
         q = Quaternion.CreateFromAxisAngle(Vector3.UnitY, rightY * BankTurnRate * dt) * q;
@@ -296,11 +352,17 @@ public sealed class FlightModel
         _throttle = input.Throttle;
         _speed = Math.Clamp(_speed + (Thrust(_speed) - forward.Y * Gravity * GravityScale) * dt, MinSpeed, DiveMaxSpeed);
 
-        _position += forward * (_speed * dt);
-        // Backstop only: the guard steering normally keeps the plane well inside these. No ceiling.
-        _position.Y = MathF.Max(_position.Y, FloorAltitude);
-        _position.X = Math.Clamp(_position.X, -AreaHalfSize, AreaHalfSize);
-        _position.Z = Math.Clamp(_position.Z, -AreaHalfSize, AreaHalfSize);
+        _position += (forward * _speed + _knock) * dt;
+        ClampToArea();
+
+        // A collision's knock and spin fade smoothly, then the plane flies on normally.
+        float fade = MathF.Exp(-dt / KnockTimeConstant);
+        _knock *= fade;
+        _kick *= fade;
+        if (_knock.LengthSquared() < KnockRest * KnockRest)
+            _knock = Vector3.Zero;
+        if (_kick.LengthSquared() < KnockRest * KnockRest)
+            _kick = Vector3.Zero;
     }
 
     /// <summary>
@@ -344,7 +406,7 @@ public sealed class FlightModel
     /// <summary>A direction to steer to instead of the pilot when near the floor or the border.</summary>
     private bool GuardDirection(Vector3 forward, out Vector3 direction, out bool low)
     {
-        float descent = MathF.Max(0f, -forward.Y) * _speed * FloorLookahead;
+        float descent = MathF.Max(0f, -(forward.Y * _speed + _knock.Y)) * FloorLookahead;
         low = _position.Y - FloorAltitude - descent < FloorMargin;
         float edge = AreaHalfSize - BorderMargin;
         bool outX = (_position.X > edge && forward.X > 0f) || (_position.X < -edge && forward.X < 0f);

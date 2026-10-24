@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using Neo.Collisions;
 using Neo.Damage;
 using Neo.Input;
 using Neo.Shell;
@@ -861,6 +862,13 @@ public class FlightModuleTests
                 a.Bus.Publish(new PlaneDestroyed(6, 1));
                 b.Bus.Publish(new PlaneDestroyed(6, 1));
             }
+            if (i == 300 || i == 900)
+            {
+                // The same collision bounces on both.
+                var bounce = new CollisionImpulse(i == 300 ? 0 : 3, new Vector3(-12f, 3f, 8f), new Vector3(0.5f, -1f, 3f), new Vector3(-0.4f, 0.1f, 0.2f));
+                a.Bus.Publish(bounce);
+                b.Bus.Publish(bounce);
+            }
             if (i == 1200)
             {
                 a.Bus.Publish(new PlaneRespawn(6));
@@ -1185,15 +1193,265 @@ public class FlightModuleTests
         Assert.True(farthest < FlightModel.AreaHalfSize - 1f, "turned back before the backstop");
     }
 
+    // Collisions: the Collisions module's CollisionImpulse, applied by every plane.
+
+    private const float CollisionDistance = 7f; // Collisions: two spheres of 3.5 m
+
+    /// <summary>
+    /// Fake of the Collisions module's bounce for planes <paramref name="a"/> and <paramref name="b"/>: equal and
+    /// opposite velocity changes along the contact normal, restitution 0.3, separation half the overlap each plus 1 cm.
+    /// </summary>
+    private static void Bounce(Rig rig, int a, int b, out Vector3 changeA)
+    {
+        FlightModel pa = rig.Module.Plane(a), pb = rig.Module.Plane(b);
+        Vector3 offset = pa.Position - pb.Position;
+        float distance = offset.Length();
+        Vector3 n = offset / distance; // from b to a
+        float closing = Vector3.Dot(pb.Velocity - pa.Velocity, n);
+        changeA = n * ((1f + 0.3f) / 2f * closing);
+        Vector3 separation = n * ((CollisionDistance - distance) / 2f + 0.01f);
+        rig.Bus.Publish(new CollisionImpulse(a, changeA, Vector3.Zero, separation));
+        rig.Bus.Publish(new CollisionImpulse(b, -changeA, Vector3.Zero, -separation));
+    }
+
+    [Fact]
+    public void Collision_TwoPlanesOnACollisionCourseSeparateAfterTheirImpulses_ThenFlyOn()
+    {
+        var rig = new Rig();
+        // Planes 0 and 4 start head-on along the same line (X = -90); move 4 a little aside, a glancing head-on.
+        rig.Bus.Publish(new CollisionImpulse(4, Vector3.Zero, Vector3.Zero, new Vector3(3f, 0f, 0f)));
+        Assert.Equal(-87f, rig.Module.Plane(4).Position.X, 3);
+        Assert.Equal(Vector3.Zero, rig.Module.Plane(4).Knock);
+
+        float Distance() => Vector3.Distance(rig.Module.Plane(0).Position, rig.Module.Plane(4).Position);
+        int steps = 0;
+        while (Distance() >= CollisionDistance)
+        {
+            rig.Tick();
+            Assert.True(++steps < 60 * 60, "never met");
+        }
+
+        Vector3 before0 = rig.Module.Plane(0).Velocity, before4 = rig.Module.Plane(4).Velocity;
+        Bounce(rig, 0, 4, out Vector3 change);
+        // Moved just clear at once, and the whole velocity change is applied (along the nose to the speed, the rest as knock).
+        Assert.InRange(Distance(), CollisionDistance, CollisionDistance + 0.05f);
+        Assert.True(Vector3.Distance(before0 + change, rig.Module.Plane(0).Velocity) < 1e-3f);
+        Assert.True(Vector3.Distance(before4 - change, rig.Module.Plane(4).Velocity) < 1e-3f);
+        Vector3 n = Vector3.Normalize(rig.Module.Plane(0).Position - rig.Module.Plane(4).Position);
+        Assert.True(Vector3.Dot(rig.Module.Plane(0).Velocity - rig.Module.Plane(4).Velocity, n) > 5f, "now moving apart");
+
+        // They pass each other without touching again, then fly on their way, back in normal flight.
+        float closest = Distance(), sideways = 0f;
+        rig.Run(4f, () =>
+        {
+            closest = MathF.Min(closest, Distance());
+            sideways = MathF.Max(sideways, MathF.Abs(rig.Module.Plane(0).Position.X - rig.Module.Plane(4).Position.X));
+            for (int id = 0; id < 8; id++)
+                Assert.InRange(rig.Bus.States[id].Speed, FlightModel.MinSpeed, FlightModel.DiveMaxSpeed);
+        });
+        Assert.True(closest >= CollisionDistance, $"touched again: {closest} m");
+        Assert.True(sideways > CollisionDistance + 2f, $"knocked apart sideways: {sideways} m");
+        Assert.True(Distance() > 50f, "flew on past each other");
+        Assert.True(rig.Bus.States[0].Position.Z < rig.Bus.States[4].Position.Z, "passed");
+        Assert.Equal(Vector3.Zero, rig.Module.Plane(0).Knock);
+        Assert.Equal(Vector3.Zero, rig.Module.Plane(4).Knock);
+        Assert.True(AngleBetween(Forward(rig.Bus.States[0]), -Vector3.UnitZ) < 0.05f, "plane 0 still heads north");
+        Assert.True(AngleBetween(Forward(rig.Bus.States[4]), Vector3.UnitZ) < 0.05f, "plane 4 still heads south");
+    }
+
+    [Fact]
+    public void Collision_DisplacesThePlane_ItsKnockDecaysToNormalFlightWithin2Seconds()
+    {
+        var rig = new Rig();
+        rig.Run(1f);
+        var start = rig.Bus.States[0];
+        var shove = new Vector3(15f, 0f, 0f); // sideways, to the east
+        rig.Bus.Publish(new CollisionImpulse(0, shove, Vector3.Zero, new Vector3(1f, 0f, 0f)));
+
+        var plane = rig.Module.Plane(0);
+        Assert.Equal(start.Position.X + 1f, plane.Position.X, 3); // moved at once
+        Assert.Equal(start.Speed, plane.Speed, 3);                // nothing along the nose
+        Assert.True(Vector3.Distance(start.Velocity + shove, plane.Velocity) < 1e-3f);
+
+        // The knock fades smoothly: never grows, about a third left at 0.3 s, gone within 2 s.
+        float previous = shove.Length(), gone = -1f, t = 0f;
+        rig.Run(3f, () =>
+        {
+            t += 1f / 60f;
+            float knock = plane.Knock.Length();
+            Assert.True(knock <= previous, "the knock only fades");
+            Assert.True(previous - knock < 2f, "smoothly, no jump");
+            if (MathF.Abs(t - 0.3f) < 0.001f)
+                Assert.InRange(knock, 0.3f * 15f, 0.45f * 15f);
+            if (MathF.Abs(t - 1f) < 0.001f)
+                Assert.True(knock < 0.1f * 15f, $"mostly gone after 1 s: {knock}");
+            if (knock == 0f && gone < 0f)
+                gone = t;
+            previous = knock;
+        });
+        Assert.InRange(gone, 1f, 2f);
+
+        // Shoved about 15 m/s x 0.3 s aside, then flies on as before: same heading, level, same speed, straight.
+        var s = rig.Bus.States[0];
+        Assert.InRange(s.Position.X - start.Position.X, 1f + 4f, 1f + 5f);
+        Assert.True(AngleBetween(Forward(s), Forward(start)) < 0.01f);
+        Assert.InRange(s.Speed, start.Speed - 0.2f, start.Speed + 0.2f);
+        Assert.True(Vector3.Distance(s.Velocity, Forward(s) * s.Speed) < 1e-4f, "back to flying along the nose");
+        float x = s.Position.X;
+        rig.Run(2f);
+        Assert.InRange(rig.Bus.States[0].Position.X, x - 0.5f, x + 0.5f);
+    }
+
+    [Fact]
+    public void Collision_SpeedAlongTheNoseChangesWithinTheLimits()
+    {
+        // Knocked back (rammed from ahead): slower, but never below the minimum; the rest is a backward knock.
+        var rig = new Rig();
+        rig.Run(1f);
+        var start = rig.Bus.States[0];
+        var back = Forward(start) * -30f;
+        rig.Bus.Publish(new CollisionImpulse(0, back, Vector3.Zero, Vector3.Zero));
+        var plane = rig.Module.Plane(0);
+        Assert.Equal(FlightModel.MinSpeed, plane.Speed);
+        Assert.True(Vector3.Distance(start.Velocity + back, plane.Velocity) < 1e-3f);
+
+        // A smaller push from behind: faster by exactly its part along the nose, nothing left over.
+        rig = new Rig();
+        rig.Run(1f);
+        start = rig.Bus.States[0];
+        rig.Bus.Publish(new CollisionImpulse(0, Forward(start) * 8f + new Vector3(0f, 2f, 0f), Vector3.Zero, Vector3.Zero));
+        plane = rig.Module.Plane(0);
+        Assert.Equal(start.Speed + 8f, plane.Speed, 3);
+        Assert.True(Vector3.Distance(plane.Knock, new Vector3(0f, 2f, 0f)) < 1e-3f);
+
+        // Rammed hard from behind at full speed: capped at the dive maximum.
+        rig = new Rig();
+        rig.Fly(Sticks(throttle: 1f), 10f);
+        rig.Bus.Publish(new CollisionImpulse(0, Forward(rig.Bus.States[0]) * 60f, Vector3.Zero, Vector3.Zero));
+        Assert.Equal(FlightModel.DiveMaxSpeed, rig.Module.Plane(0).Speed);
+
+        // Then speed stays in range and settles back at the throttle's.
+        var s = rig.Fly(Sticks(throttle: 1f), 30f, p => Assert.InRange(p.Speed, FlightModel.MinSpeed, FlightModel.DiveMaxSpeed));
+        Assert.InRange(s.Speed, 57f, 60f);
+    }
+
+    [Theory]
+    [InlineData(1f)]
+    [InlineData(-1f)]
+    public void Collision_RollKickRollsThePlane_ThenHandsOffRecovers(float side)
+    {
+        var rig = new Rig();
+        rig.Run(1f);
+        // A wingtip strike: positive roll raises the right wing (rolls left, negative bank).
+        rig.Bus.Publish(new CollisionImpulse(0, Vector3.Zero, new Vector3(0f, 0f, 4f * side), Vector3.Zero));
+        float most = 0f, previous = 0f, t = 0f, recovered = -1f;
+        rig.Run(5f, () =>
+        {
+            t += 1f / 60f;
+            float bank = Bank(rig.Bus.States[0]);
+            Assert.True(MathF.Abs(bank - previous) < 5f * Deg, "rolls smoothly");
+            previous = bank;
+            most = MathF.Max(most, -bank * side);
+            if (recovered < 0f && t > 0.5f && MathF.Abs(bank) < 3f * Deg)
+                recovered = t;
+            Assert.True(-bank * side > -5f * Deg, "no overshoot past level");
+        });
+        Assert.InRange(most, 25f * Deg, 70f * Deg); // a brief roll away (4 rad/s x 0.3 s = 69 degrees, less the levelling)
+        Assert.InRange(recovered, 1f, 4.5f);
+        var s = rig.Bus.States[0];
+        Assert.True(MathF.Abs(Bank(s)) < 2f * Deg, "wings level again");
+        Assert.True(MathF.Abs(Climb(s)) < 2f * Deg, "still level");
+        Assert.Equal(Vector3.Zero, rig.Module.Plane(0).Kick);
+    }
+
+    [Fact]
+    public void Collision_PilotInputActsOnTopOfTheKick()
+    {
+        // Holding roll right against a kick to the left: rolls away less, and comes back right.
+        var kicked = new Rig();
+        var held = new Rig();
+        kicked.Run(1f);
+        held.Run(1f);
+        var kick = new CollisionImpulse(0, Vector3.Zero, new Vector3(0f, 0f, 4f), Vector3.Zero);
+        kicked.Bus.Publish(kick);
+        held.Bus.Publish(kick);
+        kicked.Fly(Sticks(), 0.4f);
+        var s = held.Fly(Sticks(roll: 1f), 0.4f);
+        Assert.True(Bank(s) > Bank(kicked.Bus.States[0]) + 30f * Deg);
+        s = held.Fly(Sticks(roll: 1f), 0.5f);
+        Assert.True(Bank(s) > 0f, "the stick wins once the kick fades");
+
+        // A pitch kick raises the nose; hands off then takes back the climb it had (level).
+        var rig = new Rig();
+        rig.Run(1f);
+        rig.Bus.Publish(new CollisionImpulse(0, Vector3.Zero, new Vector3(1.5f, 0f, 0f), Vector3.Zero));
+        float highest = 0f;
+        rig.Run(1f, () => highest = MathF.Max(highest, Climb(rig.Bus.States[0])));
+        Assert.True(highest > 8f * Deg, $"nose knocked up: {highest / Deg} deg");
+        rig.Run(5f);
+        Assert.True(MathF.Abs(Climb(rig.Bus.States[0])) < 2f * Deg, "back to level");
+    }
+
+    [Fact]
+    public void Collision_FloorAndBorderStillHold()
+    {
+        // Knocked down hard near the floor: never below it.
+        var rig = new Rig();
+        rig.Run(0.5f);
+        rig.Bus.Publish(new CollisionImpulse(0, new Vector3(0f, -60f, 0f), new Vector3(-3f, 0f, 0f), new Vector3(0f, -390f, 0f)));
+        Assert.Equal(FlightModel.FloorAltitude, rig.Module.Plane(0).Position.Y);
+        rig.Run(10f, () => Assert.True(rig.Bus.States[0].Position.Y >= FlightModel.FloorAltitude));
+
+        // Knocked out of the area: back at the edge at once, and stays inside.
+        rig = new Rig();
+        rig.Run(0.5f);
+        rig.Bus.Publish(new CollisionImpulse(0, new Vector3(60f, 0f, 0f), Vector3.Zero, new Vector3(5000f, 0f, 0f)));
+        Assert.Equal(FlightModel.AreaHalfSize, rig.Module.Plane(0).Position.X);
+        rig.Run(10f, () =>
+        {
+            var p = rig.Bus.States[0].Position;
+            Assert.True(MathF.Abs(p.X) <= FlightModel.AreaHalfSize && MathF.Abs(p.Z) <= FlightModel.AreaHalfSize);
+        });
+    }
+
+    [Fact]
+    public void Collision_DownedPlanesUnknownIdsAndBadValuesAreIgnored()
+    {
+        var rig = new Rig();
+        rig.Run(0.5f);
+        rig.Bus.Publish(new PlaneDestroyed(2, 5));
+        rig.Tick();
+        var down = rig.Module.Plane(2).Position;
+        rig.Bus.Publish(new CollisionImpulse(2, new Vector3(20f, 0f, 0f), new Vector3(0f, 0f, 4f), new Vector3(3f, 0f, 0f)));
+        Assert.Equal(down, rig.Module.Plane(2).Position);
+        Assert.Equal(Vector3.Zero, rig.Module.Plane(2).Knock);
+        Assert.Equal(Vector3.Zero, rig.Module.Plane(2).Kick);
+
+        var before = rig.Module.Plane(1).Position;
+        rig.Bus.Publish(new CollisionImpulse(1, new Vector3(float.NaN, 0f, 0f), Vector3.Zero, new Vector3(3f, 0f, 0f)));
+        Assert.Equal(before, rig.Module.Plane(1).Position);
+        rig.Bus.Publish(new CollisionImpulse(8, Vector3.One, Vector3.One, Vector3.One));
+        rig.Bus.Publish(new CollisionImpulse(-1, Vector3.One, Vector3.One, Vector3.One));
+        rig.Tick();
+        Assert.True(float.IsFinite(rig.Bus.States[1].Position.X));
+    }
+
     [Fact]
     public void TickDoesNotAllocate()
     {
         var rig = new Rig();
         var input = Aim(Vector3.Normalize(new Vector3(1f, 0.2f, 0f)));
         rig.Fly(input, 1f); // warm up (JIT)
+        var bounce = new CollisionImpulse(0, new Vector3(5f, 0f, 5f), new Vector3(0f, 0f, 2f), new Vector3(0.5f, 0f, 0f));
+        rig.Bus.Publish(bounce);
+        rig.Step(input);
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 600; i++)
+        {
+            if (i % 120 == 0)
+                rig.Bus.Publish(bounce); // collisions too
             rig.Step(input);
+        }
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
     }
 }

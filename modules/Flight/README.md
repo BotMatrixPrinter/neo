@@ -12,8 +12,9 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
   - `Vector3 Position`: world, meters, Y up
   - `Quaternion Orientation`: body to world (System.Numerics); body axes +X right, +Y up,
     -Z forward (Godot's convention), so the nose is `Vector3.Transform(-Vector3.UnitZ, Orientation)`
-  - `Vector3 Velocity`: world m/s, always along the nose
-  - `float Speed`: m/s, the length of `Velocity`
+  - `Vector3 Velocity`: world m/s, along the nose, plus a collision's fading knock (see
+    "Collisions") for about a second after one
+  - `float Speed`: m/s along the nose (25..85), the length of `Velocity` except during a knock
   - `float Throttle`: 0..1, the throttle in use
   - `bool Alive`: false while the plane is down (falling or on the ground). Added after the
     others: the old six-argument constructor still works and means `Alive` true.
@@ -22,6 +23,8 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
   plane: hands off (it flies on level, as it started), throttle 0.5.
 - **Damage**: subscribes to `Neo.Damage.PlaneDamageState`, `PlaneDestroyed`, `PlaneRespawn`
   and `RepairState` (modules/Damage/Contract); see "Damage" below.
+- **Collisions**: subscribes to `Neo.Collisions.CollisionImpulse` (modules/Collisions/Contract);
+  see "Collisions" below.
 - **Core** (`Core/`): `FlightModule` (the `IModule`) keeps one `FlightModel` per plane
   (`Plane(id)`, `Model` is plane 0), steps them all each tick and publishes their states.
   No allocations per tick; deterministic (same inputs, same result).
@@ -117,6 +120,27 @@ Each plane keeps the latest part health from `PlaneDamageState` (0..1, 1 undamag
 - **`PlaneRespawn`**: back at its team's start point and heading, level, at full speed
   (60 m/s), `Alive` true, parts back at full health.
 
+## Collisions
+
+On a `CollisionImpulse` for a flying plane (`FlightModel.ApplyImpulse`; downed planes, ids
+outside 0..7 and non-finite values are ignored), at once:
+
+- **Separation**: the plane moves by it (still inside the floor and border backstops).
+- **VelocityChange**: its part along the nose changes the speed (kept within 25..85 m/s); the
+  rest (sideways, and whatever the speed limits cut off) becomes a **knock** velocity
+  (`FlightModel.Knock`) added to the flight along the nose, so the whole change applies at once.
+  The knock fades smoothly (time constant 0.3 s, `KnockTimeConstant`: about a third left at 0.3 s,
+  4% at 1 s) and is gone (below 0.05 m/s, `KnockRest`) within about 1.5-2 s: the plane is shoved
+  sideways or back (about 0.3 s x the knock, e.g. 4.5 m for 15 m/s), then flies on as before.
+- **AngularKick** (body rad/s, x pitch, y yaw, z roll, right-handed about +X right, +Y up,
+  +Z back): added as a spin (`FlightModel.Kick`) that turns the plane on top of its controls and
+  fades the same way. A wingtip strike sends it into a brief roll (4 rad/s: about 40 degrees);
+  the pilot's sticks, aim or the hands-off levelling act on top and bring it back (hands off,
+  wings level again within about 3 s; a pitch kick's climb is taken back to the one held).
+
+The floor guard counts a downward knock in its look-ahead; floor and border clamps still hold.
+Destroy and respawn clear knock and spin. Deterministic, no allocation.
+
 ## Tests
 
 `Tests/FlightModuleTests.cs`, with a fake bus (`TestBus`) that publishes fake
@@ -142,6 +166,13 @@ old constructor, engine damage (lower level speed, slows down gradually to it, c
 dives slower), wing and tail damage, falling to the ground and staying there on
 `PlaneDestroyed`, respawn at the team's start point at full speed, repairing (sticks and aim
 ignored, wings level and heading and climb kept, sticks back at once after; other and unknown ids;
-throttle still works; floor and border guards still act).
+throttle still works; floor and border guards still act), collisions (two planes on a
+head-on course, given a fake of Collisions' bounce, move just clear, get the whole velocity
+change, pass each other without touching again and fly on; a sideways shove moves the plane at
+once and its knock fades smoothly, gone within 2 s, then it flies on straight; speed along the
+nose changes within 25..85 and settles back; a roll kick either way rolls it and hands off
+recovers without overshoot; sticks act on top of a kick; a pitch kick is taken back; floor and
+border hold; downed planes, unknown ids and NaN ignored; deterministic and allocation-free with
+impulses). The fake bus delivers each message once per subscription to its type, like the shell's.
 
 Test it alone: `./test.sh Flight`. No Godot view: the Plane module draws the plane.
