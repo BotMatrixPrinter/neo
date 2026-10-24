@@ -10,7 +10,8 @@ Publishes nothing; its Contract (`Neo.HUD.Contract`) is empty for now.
 
 Uses other modules' Contracts: reads `Neo.Flight.PlaneState` (every plane; teams from `Neo.Flight.Teams`), `Neo.Guns.GunState`
 (plane 0), `Neo.Targets.TargetDestroyed` (any target), and from `Neo.Damage`:
-`PlaneDamageState` (plane 0), `PlaneDestroyed` (any plane) and `PlaneRespawn` (plane 0).
+`PlaneDamageState` (plane 0), `PlaneDestroyed` (any plane), `PlaneRespawn` (plane 0) and
+`RepairState` (plane 0).
 
 Plane names (the "Enemy Planes" wave): 0 is the player, "You"; 1-3 are "Blue <id>" (Allies),
 4-7 "Red <id>" (Central).
@@ -31,6 +32,15 @@ Plane names (the "Enemy Planes" wave): 0 is the player, "You"; 1-3 are "Blue <id
   (crossed out) at 0.
 - `Kills`: `PlaneDestroyed` of an enemy (4-7) shot by plane 0 (friendly fire is no kill);
   `Deaths`: every `PlaneDestroyed` of plane 0.
+- Repair (from plane 0's `RepairState`): `Repairing`, `RepairPart`, `RepairProgress` (0..1, 0 when
+  not repairing), `RepairText` "REPAIRING ENGINE" / "LEFT WING" / "RIGHT WING" / "TAIL"
+  (`RepairingText(part)`; empty when not repairing), `RepairPartsAfter` (`PartsLeft` - 1) and
+  `RepairMoreText` "1 more".."3 more" (empty for none). `RepairCancelled` for 1.5 s
+  (`RepairCancelledSeconds`, `RepairCancelledSecondsLeft`) when a repair stops while the plane is
+  alive and still damaged (Repair let go mid-cycle; not when the last part is done or the plane
+  goes down; cleared when a repair runs again); text `RepairCancelledText` "Repair cancelled".
+  `ShowRepairHint` while alive, a part below 1 and no repair runs; text `RepairHintText`
+  "Hold Y / R: repair".
 - Kill feed: one line per `PlaneDestroyed` (any plane), up to 6 (a 7th pushes out the oldest),
   each for 5 s of Ticks. `KillFeedCount`, `KillFeedText(i)` (0 the oldest),
   `KillFeedVictim/Shooter(i)`, `KillFeedSecondsLeft(i)`. Lines: "You shot down Red 5",
@@ -64,7 +74,11 @@ panels anchored to the corners:
 - top left: a little balloon and "Balloons popped: N"; when N rises the number bounces and
   wiggles and a "+1" floats up; next to it "Kills N  Deaths N";
 - bottom, next to the flight panel: DAMAGE, a little plane from above (`DamageIcon.cs`) whose
-  engine, wings and tail are green / orange / red, crossed out when destroyed;
+  engine, wings and tail are green / orange / red, crossed out when destroyed; the part being
+  repaired glows (pulsing cream-gold outline);
+- above the damage panel: while repairing, "REPAIRING <part>", "N more" and a green progress bar;
+  after letting go mid-cycle, "Repair cancelled" in red (fading out at the end); else, while
+  damaged, a small "Hold Y / R: repair" panel;
 - top right: the kill feed, newest on top, lines with the player on a gold-brown panel, fading
   out at the end of their 5 s;
 - under all the panels (`PlaneMarkers.cs`), for every other alive plane: on screen a small
@@ -80,11 +94,14 @@ shell disables the module, the layer hides itself. Opened on its own (no module 
 `screenshot.sh` does) it runs a preview with its own Core over a sky backdrop: a plane
 climbing, the guns heating up and overheating every 6 s, a balloon popping every 0.5 s, and
 six other planes around the player (three ahead with markers, three off screen; one more is down),
-with its own camera following the player, and every 10 s two kills, then the player's parts wearing down until shot down at 1.3 s and back 5 s later.
+with its own camera following the player, and every 10 s two kills, then the player's parts wearing down until shot down at 1.3 s and back 5 s later; at 6.6 s the
+engine and left wing are hit (the hint), at 7.1 s the engine is repaired (Repair held) and at 9.5 s
+let go ("Repair cancelled").
 
 Screenshots (not committed): `./screenshot.sh modules/HUD/Godot/Main.tscn` (`HUD.png`, shot
 down), damaged but flying, with the plane markers, `FRAMES=65 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-damage`, and,
-overheated, `FRAMES=200 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-overheated`.
+overheated, `FRAMES=200 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-overheated`; repair:
+`FRAMES=415` (`HUD-repair-hint`), `FRAMES=520` (`HUD-repairing`), `FRAMES=580` (`HUD-repair-cancelled`).
 
 ## Tests (`Tests/`)
 
@@ -92,7 +109,9 @@ overheated, `FRAMES=200 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-overheat
 values for interpolation, heat and overheat, counting pops, part levels and the damage panel
 (plane 0 only), plane names and kill feed lines, the feed's 5 s and its limit, kills and deaths,
 the shot-down countdown to the respawn, markers only for other alive planes and their interpolated
-positions (no sweep on a respawn), publishes nothing, no allocations.
+positions (no sweep on a respawn), repair (part texts, progress, "N more", the hint only while
+damaged and not repairing or down, "Repair cancelled" for 1.5 s only on a mid-cycle release and
+cleared by a new repair, not on finishing or going down, other planes ignored), publishes nothing, no allocations.
 
 `MarkersTests`: team colors and shapes, distance texts, on/off screen (outside the view, behind
 the camera), the edge direction and angle in front and behind, the 40% circle.

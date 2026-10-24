@@ -76,6 +76,140 @@ public class HudModuleTests
         Assert.Equal(PartLevel.Good, hud.Level(PlanePart.Tail));
     }
 
+    private static RepairState Repair(PlanePart part, float progress, int partsLeft, int planeId = 0) =>
+        new(planeId, true, part, progress, partsLeft);
+
+    private static RepairState NoRepair(int partsLeft, int planeId = 0) =>
+        new(planeId, false, PlanePart.Engine, 0f, partsLeft);
+
+    // One tick of Damage's messages for plane 0, in its order: the parts, then the repair.
+    private static void Step(HudModule hud, FakeBus bus, PlaneDamageState parts, RepairState repair)
+    {
+        bus.Send(parts);
+        bus.Send(repair);
+        hud.Tick(OneStep);
+    }
+
+    [Fact]
+    public void Repairing_shows_the_part_progress_and_parts_left()
+    {
+        var (hud, bus) = Started();
+        var parts = new PlaneDamageState(0, 0.9f, 0.5f, 1f, 0.2f, true);
+        Step(hud, bus, parts, Repair(PlanePart.Tail, 0.25f, 3));
+        Assert.True(hud.Repairing);
+        Assert.Equal(PlanePart.Tail, hud.RepairPart);
+        Assert.Equal("REPAIRING TAIL", hud.RepairText);
+        Assert.Equal(0.25f, hud.RepairProgress);
+        Assert.Equal(2, hud.RepairPartsAfter);
+        Assert.Equal("2 more", hud.RepairMoreText);
+        Assert.False(hud.ShowRepairHint);
+        Assert.False(hud.RepairCancelled);
+
+        // The tail done, the next cycle on the left wing; the last part has no "more".
+        parts = new PlaneDamageState(0, 0.9f, 0.5f, 1f, 1f, true);
+        Step(hud, bus, parts, Repair(PlanePart.LeftWing, 0f, 2));
+        Assert.Equal("REPAIRING LEFT WING", hud.RepairText);
+        Assert.Equal(0f, hud.RepairProgress);
+        Assert.Equal("1 more", hud.RepairMoreText);
+        Step(hud, bus, new PlaneDamageState(0, 0.9f, 1f, 1f, 1f, true), Repair(PlanePart.Engine, 0.5f, 1));
+        Assert.Equal("REPAIRING ENGINE", hud.RepairText);
+        Assert.Equal(0, hud.RepairPartsAfter);
+        Assert.Equal("", hud.RepairMoreText);
+    }
+
+    [Theory]
+    [InlineData(PlanePart.Engine, "REPAIRING ENGINE")]
+    [InlineData(PlanePart.LeftWing, "REPAIRING LEFT WING")]
+    [InlineData(PlanePart.RightWing, "REPAIRING RIGHT WING")]
+    [InlineData(PlanePart.Tail, "REPAIRING TAIL")]
+    public void Repairing_texts(PlanePart part, string text) => Assert.Equal(text, HudModule.RepairingText(part));
+
+    [Fact]
+    public void Repair_hint_while_damaged_and_not_repairing()
+    {
+        var (hud, bus) = Started();
+        Assert.Equal("Hold Y / R: repair", HudModule.RepairHintText);
+        Step(hud, bus, new PlaneDamageState(0, 1f, 1f, 1f, 1f, true), NoRepair(0));
+        Assert.False(hud.ShowRepairHint);
+        Assert.Equal("", hud.RepairText);
+
+        Step(hud, bus, new PlaneDamageState(0, 1f, 1f, 0.95f, 1f, true), NoRepair(1));
+        Assert.True(hud.ShowRepairHint);
+
+        Step(hud, bus, new PlaneDamageState(0, 1f, 1f, 0.95f, 1f, true), Repair(PlanePart.RightWing, 0.1f, 1));
+        Assert.False(hud.ShowRepairHint);
+
+        // Downed: no hint, even though the parts are damaged.
+        bus.Send(new PlaneDestroyed(0, 4));
+        Step(hud, bus, new PlaneDamageState(0, 0f, 1f, 0.95f, 1f, false), NoRepair(2));
+        Assert.False(hud.ShowRepairHint);
+        bus.Send(new PlaneRespawn(0));
+        Step(hud, bus, new PlaneDamageState(0, 1f, 1f, 1f, 1f, true), NoRepair(0));
+        Assert.False(hud.ShowRepairHint);
+    }
+
+    [Fact]
+    public void Letting_go_mid_cycle_shows_repair_cancelled_for_a_moment()
+    {
+        var (hud, bus) = Started();
+        var parts = new PlaneDamageState(0, 0.4f, 1f, 1f, 1f, true);
+        Step(hud, bus, parts, Repair(PlanePart.Engine, 0.6f, 1));
+        Step(hud, bus, parts, NoRepair(1));
+        Assert.False(hud.Repairing);
+        Assert.Equal("", hud.RepairText);
+        Assert.Equal(0f, hud.RepairProgress);
+        Assert.True(hud.RepairCancelled);
+        Assert.Equal("Repair cancelled", HudModule.RepairCancelledText);
+        Assert.True(hud.ShowRepairHint);
+
+        int ticks = 1;
+        while (hud.RepairCancelled)
+        {
+            Step(hud, bus, parts, NoRepair(1));
+            ticks++;
+        }
+        Assert.Equal((int)Math.Round(HudModule.RepairCancelledSeconds * 60), ticks);
+
+        // Holding again clears it at once.
+        Step(hud, bus, parts, Repair(PlanePart.Engine, 0.6f, 1));
+        Step(hud, bus, parts, NoRepair(1));
+        Assert.True(hud.RepairCancelled);
+        Step(hud, bus, parts, Repair(PlanePart.Engine, 0f, 1));
+        Assert.False(hud.RepairCancelled);
+    }
+
+    [Fact]
+    public void Repair_finishing_or_going_down_is_not_cancelled()
+    {
+        var (hud, bus) = Started();
+        Step(hud, bus, new PlaneDamageState(0, 0.4f, 1f, 1f, 1f, true), Repair(PlanePart.Engine, 0.99f, 1));
+        Step(hud, bus, new PlaneDamageState(0, 1f, 1f, 1f, 1f, true), NoRepair(0));
+        Assert.False(hud.Repairing);
+        Assert.False(hud.RepairCancelled);
+        Assert.False(hud.ShowRepairHint);
+
+        Step(hud, bus, new PlaneDamageState(0, 0.4f, 1f, 1f, 1f, true), Repair(PlanePart.Engine, 0.5f, 1));
+        bus.Send(new PlaneDestroyed(0, 5));
+        Step(hud, bus, new PlaneDamageState(0, 0f, 1f, 1f, 1f, false), NoRepair(1));
+        Assert.False(hud.Repairing);
+        Assert.False(hud.RepairCancelled);
+    }
+
+    [Fact]
+    public void Other_planes_repairs_are_ignored()
+    {
+        var (hud, bus) = Started();
+        bus.Send(new PlaneDamageState(5, 0.5f, 1f, 1f, 1f, true));
+        bus.Send(Repair(PlanePart.Engine, 0.5f, 1, planeId: 5));
+        hud.Tick(OneStep);
+        Assert.False(hud.Repairing);
+        Assert.Equal("", hud.RepairText);
+        bus.Send(Repair(PlanePart.Engine, 0.5f, 1));
+        bus.Send(NoRepair(1, planeId: 5));
+        Assert.True(hud.Repairing);
+        Assert.False(hud.RepairCancelled);
+    }
+
     [Theory]
     [InlineData(0, "You")]
     [InlineData(1, "Blue 1")]
@@ -350,6 +484,7 @@ public class HudModuleTests
         bus.Send(new PlaneDamageState(0, 0.5f, 1f, 1f, 1f, true));
         bus.Send(new PlaneDestroyed(0, 5));
         bus.Send(new PlaneRespawn(0));
+        bus.Send(Repair(PlanePart.Engine, 0.5f, 1));
         hud.Tick(OneStep);
         Assert.Empty(bus.Published);
     }
@@ -366,6 +501,9 @@ public class HudModuleTests
         var damage = capture.Damage!;
         var down = capture.Down!;
         var respawn = capture.Respawn!;
+        var repair = capture.Repair!;
+        var repairing = Repair(PlanePart.Tail, 0.4f, 3);
+        var released = NoRepair(3);
         var parts = new PlaneDamageState(0, 0.7f, 0.4f, 0.2f, 0f, false);
         var kill = new PlaneDestroyed(5, 0);
         var death = new PlaneDestroyed(0, 4);
@@ -386,6 +524,9 @@ public class HudModuleTests
             quiet.Tick(OneStep);
             _ = quiet.KillFeedText(0);
             _ = quiet.RespawnText;
+            repair.Handle(in repairing);
+            _ = quiet.RepairText;
+            _ = quiet.RepairMoreText;
         }
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 1000; i++)
@@ -403,6 +544,16 @@ public class HudModuleTests
             _ = quiet.KillFeedText(quiet.KillFeedCount - 1);
             _ = quiet.RespawnText;
             respawn.Handle(in back);
+            damage.Handle(in parts);
+            if (i % 2 == 0)
+                repair.Handle(in repairing);
+            else
+                repair.Handle(in released);
+            _ = quiet.RepairText;
+            _ = quiet.RepairMoreText;
+            _ = quiet.RepairProgress;
+            _ = quiet.ShowRepairHint;
+            _ = quiet.RepairCancelled;
             quiet.Tick(OneStep);
         }
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
@@ -419,6 +570,7 @@ public class HudModuleTests
         public IMessageHandler<PlaneDamageState>? Damage;
         public IMessageHandler<PlaneDestroyed>? Down;
         public IMessageHandler<PlaneRespawn>? Respawn;
+        public IMessageHandler<RepairState>? Repair;
 
         public void Subscribe<T>(IMessageHandler<T> handler) where T : struct
         {
@@ -434,6 +586,8 @@ public class HudModuleTests
                 Down = down;
             if (handler is IMessageHandler<PlaneRespawn> respawn)
                 Respawn = respawn;
+            if (handler is IMessageHandler<RepairState> repair)
+                Repair = repair;
         }
 
         public void Publish<T>(in T message) where T : struct { }

@@ -15,7 +15,7 @@ namespace Neo.HUD;
 /// Tick's values kept so the view can interpolate. From the Damage module: plane 0's part health
 /// (<see cref="PlaneDamageState"/>), the kill feed and plane 0's kills and deaths
 /// (<see cref="PlaneDestroyed"/>), and the "shot down" countdown until its
-/// <see cref="PlaneRespawn"/>. Publishes nothing; allocation-free (texts come from tables built once).
+/// <see cref="PlaneRespawn"/>, and plane 0's in-flight repair (<see cref="RepairState"/>). Publishes nothing; allocation-free (texts come from tables built once).
 /// </summary>
 public sealed class HudModule : IModule
 {
@@ -42,11 +42,23 @@ public sealed class HudModule : IModule
     /// <summary>The first id of team Central.</summary>
     public const int FirstEnemy = 4;
 
+    /// <summary>Seconds "Repair cancelled" stays up after Repair is let go before a cycle finished.</summary>
+    public const double RepairCancelledSeconds = 1.5;
+
+    /// <summary>Shown under the repair: "Repair cancelled".</summary>
+    public const string RepairCancelledText = "Repair cancelled";
+
+    /// <summary>Shown while a part is damaged and no repair runs.</summary>
+    public const string RepairHintText = "Hold Y / R: repair";
+
     private const int MaxCountdown = 9;
+    private const int PartCount = 4;
 
     private static readonly string[] Names = BuildNames();
     private static readonly string[] KillLines = BuildKillLines();
     private static readonly string[] RespawnTexts = BuildRespawnTexts();
+    private static readonly string[] RepairingTexts = { "REPAIRING ENGINE", "REPAIRING LEFT WING", "REPAIRING RIGHT WING", "REPAIRING TAIL" };
+    private static readonly string[] MoreTexts = { "", "1 more", "2 more", "3 more" };
 
     private readonly PlaneHandler _planeHandler;
     private readonly GunHandler _gunHandler;
@@ -54,6 +66,8 @@ public sealed class HudModule : IModule
     private readonly DamageHandler _damageHandler;
     private readonly PlaneDownHandler _planeDownHandler;
     private readonly RespawnHandler _respawnHandler;
+    private readonly RepairHandler _repairHandler;
+    private RepairState _repair;
     private readonly int[] _feedVictim = new int[KillFeedCapacity];
     private readonly int[] _feedShooter = new int[KillFeedCapacity];
     private readonly double[] _feedLeft = new double[KillFeedCapacity];
@@ -73,6 +87,7 @@ public sealed class HudModule : IModule
         _damageHandler = new DamageHandler(this);
         _planeDownHandler = new PlaneDownHandler(this);
         _respawnHandler = new RespawnHandler(this);
+        _repairHandler = new RepairHandler(this);
     }
 
     /// <summary>A <see cref="PlaneState"/> for plane 0 has been received.</summary>
@@ -125,6 +140,40 @@ public sealed class HudModule : IModule
             return PartLevel.Worn;
         return PartLevel.Good;
     }
+
+    /// <summary>A repair cycle runs on plane 0 (last <see cref="RepairState"/>).</summary>
+    public bool Repairing => _repair.Repairing;
+
+    /// <summary>The part being repaired (meaningful only while <see cref="Repairing"/>); the plane icon highlights it.</summary>
+    public PlanePart RepairPart => _repair.Part;
+
+    /// <summary>The current cycle's progress, 0..1 (0 when not repairing): the progress bar.</summary>
+    public float RepairProgress => _repair.Repairing ? System.Math.Clamp(_repair.Progress, 0f, 1f) : 0f;
+
+    /// <summary>Damaged parts after the one being repaired (0 when not repairing).</summary>
+    public int RepairPartsAfter => _repair.Repairing ? System.Math.Clamp(_repair.PartsLeft - 1, 0, PartCount - 1) : 0;
+
+    /// <summary>"REPAIRING ENGINE" / "LEFT WING" / "RIGHT WING" / "TAIL" while repairing; empty otherwise.</summary>
+    public string RepairText => _repair.Repairing ? RepairingText(_repair.Part) : string.Empty;
+
+    /// <summary>"N more" for <see cref="RepairPartsAfter"/>; empty when none or not repairing.</summary>
+    public string RepairMoreText => MoreTexts[RepairPartsAfter];
+
+    /// <summary>
+    /// "Repair cancelled" is up: Repair was let go (still alive, parts still damaged) before the
+    /// running cycle finished; for <see cref="RepairCancelledSeconds"/> or until a repair runs again.
+    /// </summary>
+    public bool RepairCancelled => RepairCancelledSecondsLeft > 0.0;
+
+    /// <summary>Seconds "Repair cancelled" stays up (0 when not shown).</summary>
+    public double RepairCancelledSecondsLeft { get; private set; }
+
+    /// <summary>Show "Hold Y / R: repair": plane 0 alive, a part below full health, no repair running.</summary>
+    public bool ShowRepairHint => !_repair.Repairing && !PlayerDown && _damage.Alive && AnyDamaged();
+
+    /// <summary>"REPAIRING " and the part's name, prebuilt.</summary>
+    public static string RepairingText(PlanePart part) =>
+        (int)part >= 0 && (int)part < PartCount ? RepairingTexts[(int)part] : "REPAIRING";
 
     /// <summary>Planes the player (plane 0) shot down: <see cref="PlaneDestroyed"/> of an enemy (ids 4-7) by plane 0.</summary>
     public int Kills { get; private set; }
@@ -211,6 +260,7 @@ public sealed class HudModule : IModule
         bus.Subscribe(_damageHandler);
         bus.Subscribe(_planeDownHandler);
         bus.Subscribe(_respawnHandler);
+        bus.Subscribe(_repairHandler);
     }
 
     public void Tick(in TickContext tick)
@@ -226,6 +276,11 @@ public sealed class HudModule : IModule
         _sampled = HasPlane;
 
         double step = tick.StepSeconds;
+        if (RepairCancelledSecondsLeft > 0.0)
+        {
+            double left = RepairCancelledSecondsLeft - step;
+            RepairCancelledSecondsLeft = left <= 1e-9 ? 0.0 : left;
+        }
         if (PlayerDown)
             RespawnSecondsLeft = System.Math.Max(0.0, RespawnSecondsLeft - step);
 
@@ -257,6 +312,22 @@ public sealed class HudModule : IModule
         _seen[id] = true;
     }
 
+    private bool AnyDamaged() =>
+        _damage.Engine < 1f || _damage.LeftWing < 1f || _damage.RightWing < 1f || _damage.Tail < 1f;
+
+    // Plane 0's RepairState (each tick, right after its PlaneDamageState). A repair that stops while
+    // the plane is alive and still damaged was let go mid-cycle: "Repair cancelled". One that stops
+    // because nothing is left, or because the plane went down, is not.
+    private void OnRepair(in RepairState message)
+    {
+        bool stopped = _repair.Repairing && !message.Repairing;
+        _repair = message;
+        if (message.Repairing)
+            RepairCancelledSecondsLeft = 0.0;
+        else if (stopped && message.PartsLeft > 0 && _damage.Alive && !PlayerDown)
+            RepairCancelledSecondsLeft = RepairCancelledSeconds;
+    }
+
     private void OnPlaneDestroyed(in PlaneDestroyed message)
     {
         int victim = message.PlaneId;
@@ -267,6 +338,7 @@ public sealed class HudModule : IModule
         {
             Deaths++;
             PlayerDown = true;
+            RepairCancelledSecondsLeft = 0.0;
             RespawnSecondsLeft = DamageLimits.RespawnSeconds;
         }
 
@@ -378,6 +450,19 @@ public sealed class HudModule : IModule
         public PlaneDownHandler(HudModule module) => _module = module;
 
         public void Handle(in PlaneDestroyed message) => _module.OnPlaneDestroyed(in message);
+    }
+
+    private sealed class RepairHandler : IMessageHandler<RepairState>
+    {
+        private readonly HudModule _module;
+
+        public RepairHandler(HudModule module) => _module = module;
+
+        public void Handle(in RepairState message)
+        {
+            if (message.PlaneId == PlaneId)
+                _module.OnRepair(in message);
+        }
     }
 
     private sealed class RespawnHandler : IMessageHandler<PlaneRespawn>

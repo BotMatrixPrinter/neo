@@ -1,11 +1,14 @@
 using Godot;
+using Neo.Damage;
 
 namespace Neo.HUD;
 
 /// <summary>
 /// The damage panel's little plane, seen from above, nose up: engine (nose), left and right
 /// wing and tail, each filled green, orange or red by its <see cref="PartLevel"/> and crossed out
-/// when destroyed; the fuselage is cream. Redraws only when <see cref="Set"/> changes a level.
+/// when destroyed; the fuselage is cream. The part being repaired (<see cref="SetRepair"/>) gets a
+/// pulsing cream-gold glow. Redraws only when <see cref="Set"/> changes a level, or each frame
+/// while a part is being repaired.
 /// </summary>
 public partial class DamageIcon : Control
 {
@@ -15,6 +18,7 @@ public partial class DamageIcon : Control
     private static readonly Color Orange = new(1f, 0.6f, 0.12f);
     private static readonly Color Red = new(0.92f, 0.16f, 0.12f);
     private static readonly Color Dead = new(0.4f, 0.1f, 0.08f);
+    private static readonly Color Glow = new(1f, 0.92f, 0.45f);
 
     // Parts in a 160x150 box.
     private static readonly Rect2 EngineRect = new(64f, 4f, 32f, 30f);
@@ -27,6 +31,8 @@ public partial class DamageIcon : Control
     private PartLevel _leftWing = PartLevel.Good;
     private PartLevel _rightWing = PartLevel.Good;
     private PartLevel _tail = PartLevel.Good;
+    private int _repairing = -1;
+    private float _pulse;
 
     public DamageIcon()
     {
@@ -46,6 +52,17 @@ public partial class DamageIcon : Control
         QueueRedraw();
     }
 
+    /// <summary>Highlights <paramref name="part"/> while <paramref name="repairing"/>; <paramref name="pulse"/> 0..1 animates the glow.</summary>
+    public void SetRepair(bool repairing, PlanePart part, float pulse)
+    {
+        int shown = repairing ? (int)part : -1;
+        if (shown == _repairing && shown < 0)
+            return;
+        _repairing = shown;
+        _pulse = pulse;
+        QueueRedraw();
+    }
+
     public override void _Draw()
     {
         Part(LeftWingRect, _leftWing);
@@ -58,6 +75,25 @@ public partial class DamageIcon : Control
         Part(EngineRect, _engine);
         // Propeller across the nose.
         DrawLine(new Vector2(52f, 3f), new Vector2(108f, 3f), Ink, 5f);
+        if (_repairing >= 0)
+            Highlight(RectOf((PlanePart)_repairing));
+    }
+
+    private static Rect2 RectOf(PlanePart part) => part switch
+    {
+        PlanePart.Engine => EngineRect,
+        PlanePart.LeftWing => LeftWingRect,
+        PlanePart.RightWing => RightWingRect,
+        _ => TailRect,
+    };
+
+    // The part being repaired: a light wash over it and a thick pulsing glow around it.
+    private void Highlight(Rect2 rect)
+    {
+        float k = 0.5f + 0.5f * _pulse;
+        DrawRect(rect, new Color(Glow, 0.2f + 0.25f * k));
+        DrawRect(rect.Grow(3f + 2f * k), Ink, false, 4f);
+        DrawRect(rect.Grow(1f + 2f * k), new Color(Glow, 0.65f + 0.35f * k), false, 5f);
     }
 
     private void Part(Rect2 rect, PartLevel level)

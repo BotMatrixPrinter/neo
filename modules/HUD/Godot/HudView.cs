@@ -12,7 +12,9 @@ namespace Neo.HUD;
 /// Bottom left: speed (km/h) and altitude (m), interpolated between fixed ticks, and the gun-heat
 /// bar (orange; flashing red with "OVERHEATED" while overheated). Top left: "Balloons popped: N",
 /// whose number pops when it rises, and the player's kills / deaths. Next to the flight panel: the
-/// damage panel, a plane icon colored by the player's part health. Top right: the kill feed.
+/// damage panel, a plane icon colored by the player's part health; above it the repair panel
+/// ("REPAIRING <part>", a progress bar and "N more", the part highlighted on the icon), a short
+/// "Repair cancelled", or the hint "Hold Y / R: repair" while damaged. Top right: the kill feed.
 /// While the player is down: a big centered "SHOT DOWN!" and the respawn countdown. Laid out for
 /// 1920x1080 and scaled to the screen. No rules here. Opened on its own (no module bound, e.g. by
 /// screenshot.sh) it runs a preview: its own Core fed a plane climbing, guns heating up, balloons
@@ -38,6 +40,13 @@ public partial class HudView : CanvasLayer, IModuleView
     private static readonly Color ShotRed = new(1f, 0.25f, 0.18f);
     private static readonly Color FeedFill = new(0.11f, 0.1f, 0.13f, 0.82f);
     private static readonly Color FeedMine = new(0.32f, 0.2f, 0.05f, 0.9f);
+    private static readonly Color RepairGreen = new(0.42f, 0.86f, 0.32f);
+
+    private const float RepairWidth = 480f;
+    private const float RepairHeight = 120f;
+    private const float RepairBarWidth = 432f;
+    private const float HintWidth = 360f;
+    private const float HintHeight = 64f;
 
     private const float FeedWidth = 560f;
     private const float FeedHeight = 58f;
@@ -67,6 +76,15 @@ public partial class HudView : CanvasLayer, IModuleView
     private Label _deaths = null!;
     private Panel _damagePanel = null!;
     private DamageIcon _damageIcon = null!;
+    private Panel _repairPanel = null!;
+    private Label _repairTitle = null!;
+    private Label _repairMore = null!;
+    private Control _repairTrack = null!;
+    private Panel _repairFill = null!;
+    private Label _repairCancelled = null!;
+    private Panel _hintPanel = null!;
+    private string? _repairShown;
+    private string? _moreShown;
     private Control _feed = null!;
     private readonly Panel[] _feedRows = new Panel[HudModule.KillFeedCapacity];
     private readonly StyleBoxFlat[] _feedStyles = new StyleBoxFlat[HudModule.KillFeedCapacity];
@@ -175,6 +193,31 @@ public partial class HudView : CanvasLayer, IModuleView
         _damageIcon = new DamageIcon { Position = new Vector2(30f, 84f) };
         _damagePanel.AddChild(_damageIcon);
 
+        // Above the damage panel: the repair (part, progress, parts left) or "Repair cancelled".
+        _repairPanel = MakePanel(new Vector2(RepairWidth, RepairHeight));
+        _repairPanel.Visible = false;
+        _root.AddChild(_repairPanel);
+        _repairTitle = MakeLabel("", font, 32, Gold, new Vector2(24f, 8f), new Vector2(330f, 50f), HorizontalAlignment.Left);
+        _repairPanel.AddChild(_repairTitle);
+        _repairMore = MakeLabel("", font, 28, Cream, new Vector2(330f, 8f), new Vector2(126f, 50f), HorizontalAlignment.Right);
+        _repairPanel.AddChild(_repairMore);
+        var repairTrack = new Panel { Position = new Vector2(24f, 64f), Size = new Vector2(RepairBarWidth, 34f), MouseFilter = Control.MouseFilterEnum.Ignore };
+        repairTrack.AddThemeStyleboxOverride("panel", Box(BarTrack, GoldDark, 3, 12, 0));
+        _repairPanel.AddChild(repairTrack);
+        _repairTrack = repairTrack;
+        _repairFill = new Panel { Position = new Vector2(4f, 4f), Size = new Vector2(0f, 26f), MouseFilter = Control.MouseFilterEnum.Ignore };
+        _repairFill.AddThemeStyleboxOverride("panel", Box(RepairGreen, Ink, 3, 10, 0));
+        repairTrack.AddChild(_repairFill);
+        _repairCancelled = MakeLabel(HudModule.RepairCancelledText, font, 40, ShotRed, Vector2.Zero, new Vector2(RepairWidth, RepairHeight), HorizontalAlignment.Center);
+        _repairCancelled.Visible = false;
+        _repairPanel.AddChild(_repairCancelled);
+
+        // Same place, while damaged and not repairing: the hint.
+        _hintPanel = MakePanel(new Vector2(HintWidth, HintHeight));
+        _hintPanel.Visible = false;
+        _root.AddChild(_hintPanel);
+        _hintPanel.AddChild(MakeLabel(HudModule.RepairHintText, font, 30, Cream, Vector2.Zero, new Vector2(HintWidth, HintHeight), HorizontalAlignment.Center));
+
         // Top right: the kill feed, newest on top.
         _feed = new Control { Size = new Vector2(FeedWidth, (FeedHeight + 10f) * HudModule.KillFeedCapacity), MouseFilter = Control.MouseFilterEnum.Ignore };
         _root.AddChild(_feed);
@@ -259,7 +302,9 @@ public partial class HudView : CanvasLayer, IModuleView
     }
 
     // Preview, every 10 s: two kills in the feed, then the player shot down at 1.3 s (its parts
-    // worn down to a destroyed tail) and back 5 s later at full health.
+    // worn down to a destroyed tail) and back 5 s later at full health. At 6.6 s the engine and left
+    // wing are hit (the repair hint), at 7.1 s Repair is held on the engine (4 s a cycle) and let go
+    // at 9.5 s (Repair cancelled).
     private void PreviewCombat(float t)
     {
         int cycle = (int)(t / 10f);
@@ -291,7 +336,13 @@ public partial class HudView : CanvasLayer, IModuleView
         }
         bool down = _previewEvent == 3;
         float k = _previewEvent >= 4 ? 0f : Mathf.Min(c / 1.3f, 1f);
-        _previewBus!.Publish(new PlaneDamageState(0, 1f - 0.3f * k, 1f - 0.5f * k, 1f - 0.8f * k, 1f - k, !down));
+        bool hit = _previewEvent >= 4 && c >= 6.6f;
+        float engine = hit ? 0.35f : 1f - 0.3f * k;
+        float leftWing = hit ? 0.7f : 1f - 0.5f * k;
+        _previewBus!.Publish(new PlaneDamageState(0, engine, leftWing, 1f - 0.8f * k, 1f - k, !down));
+        int damaged = (engine < 1f ? 1 : 0) + (leftWing < 1f ? 1 : 0) + (k > 0f ? 2 : 0);
+        bool held = hit && c >= 7.1f && c < 9.5f;
+        _previewBus.Publish(new RepairState(0, held, PlanePart.Engine, held ? (c - 7.1f) / (float)DamageLimits.RepairSeconds : 0f, damaged));
     }
 
     public override void _Process(double delta)
@@ -382,6 +433,42 @@ public partial class HudView : CanvasLayer, IModuleView
         }
 
         _damageIcon.Set(_hud.Level(PlanePart.Engine), _hud.Level(PlanePart.LeftWing), _hud.Level(PlanePart.RightWing), _hud.Level(PlanePart.Tail));
+        _damageIcon.SetRepair(_hud.Repairing, _hud.RepairPart, Mathf.Sin(_clock * 9f));
+
+        // Repair: part, progress bar and parts left; else "Repair cancelled" fading out; else the hint.
+        if (_hud.Repairing)
+        {
+            string title = _hud.RepairText;
+            if (!ReferenceEquals(title, _repairShown))
+            {
+                _repairShown = title;
+                _repairTitle.Text = title;
+            }
+            string more = _hud.RepairMoreText;
+            if (!ReferenceEquals(more, _moreShown))
+            {
+                _moreShown = more;
+                _repairMore.Text = more;
+            }
+            _repairFill.Size = new Vector2((RepairBarWidth - 8f) * _hud.RepairProgress, 26f);
+            _repairFill.Visible = _hud.RepairProgress > 0.01f;
+            SetRepairMode(true);
+            _repairPanel.Modulate = Colors.White;
+            _repairPanel.Visible = true;
+            _hintPanel.Visible = false;
+        }
+        else if (_hud.RepairCancelled)
+        {
+            SetRepairMode(false);
+            _repairPanel.Modulate = new Color(1f, 1f, 1f, Mathf.Clamp((float)_hud.RepairCancelledSecondsLeft / 0.4f, 0f, 1f));
+            _repairPanel.Visible = true;
+            _hintPanel.Visible = false;
+        }
+        else
+        {
+            _repairPanel.Visible = false;
+            _hintPanel.Visible = _hud.ShowRepairHint;
+        }
 
         // Kill feed: newest on top; lines with the player in them on a gold-brown panel; fading out at the end.
         int count = _hud.KillFeedCount;
@@ -431,6 +518,14 @@ public partial class HudView : CanvasLayer, IModuleView
         }
     }
 
+    private void SetRepairMode(bool repairing)
+    {
+        _repairTitle.Visible = repairing;
+        _repairMore.Visible = repairing;
+        _repairTrack.Visible = repairing;
+        _repairCancelled.Visible = !repairing;
+    }
+
     // Design space is 1920x1080; the root is scaled to fit the screen and the panels anchor to its corners.
     private void Layout()
     {
@@ -447,6 +542,8 @@ public partial class HudView : CanvasLayer, IModuleView
         _flightPanel.Position = new Vector2(Margin, _root.Size.Y - Margin - _flightPanel.Size.Y);
         _scorePanel.Position = new Vector2(Margin + _popPanel.Size.X + 20f, Margin);
         _damagePanel.Position = new Vector2(Margin + _flightPanel.Size.X + 20f, _flightPanel.Position.Y);
+        _repairPanel.Position = new Vector2(_damagePanel.Position.X, _damagePanel.Position.Y - 20f - RepairHeight);
+        _hintPanel.Position = new Vector2(_damagePanel.Position.X, _damagePanel.Position.Y - 20f - HintHeight);
         _feed.Position = new Vector2(_root.Size.X - Margin - FeedWidth, Margin);
         _downLayer.Size = _root.Size;
         _downBox.Position = new Vector2((_root.Size.X - _downBox.Size.X) * 0.5f, (_root.Size.Y - _downBox.Size.Y) * 0.5f - 60f);
