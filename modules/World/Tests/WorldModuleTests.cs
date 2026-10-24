@@ -60,7 +60,8 @@ public class WorldModuleTests
     {
         Assert.Equal(4000f, 2 * WorldBounds.HalfSize);
         Assert.Equal(0f, WorldBounds.GroundY);
-        Assert.Equal(15f, WorldBounds.MaxHillHeight);
+        Assert.Equal(Terrain.MaxHeight, WorldBounds.MaxHillHeight);
+        Assert.Equal(WorldBounds.GroundY, Terrain.WaterLevel);
     }
 
     [Fact]

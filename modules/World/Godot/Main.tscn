@@ -32,8 +32,8 @@ fog_light_color = Color(0.8, 0.9, 0.96, 1)
 fog_light_energy = 1.0
 fog_sky_affect = 0.0
 fog_depth_curve = 1.6
-fog_depth_begin = 500.0
-fog_depth_end = 2600.0
+fog_depth_begin = 900.0
+fog_depth_end = 4200.0
 
 [sub_resource type="ShaderMaterial" id="ground_outline"]
 render_priority = 0
@@ -81,7 +81,7 @@ material_override = SubResource("tree_mat")
 material_override = SubResource("tree_mat")
 
 [node name="PreviewCamera" type="Camera3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 0.970296, 0.241922, 0, -0.241922, 0.970296, -60, 150, 800)
+transform = Transform3D(0.985736, -0.025595, 0.166339, 0, 0.988368, 0.152081, -0.168296, -0.149912, 0.97427, 250, 320, 1750)
 fov = 60.0
 far = 6000.0
 current = true

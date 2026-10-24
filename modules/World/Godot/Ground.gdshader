@@ -1,12 +1,15 @@
 // Toon material of the ground: a patchwork of fields (greens and golden yellows) with dark
-// hedges and ink lines between them, and the winding river, all painted from the world
-// position. The river curve must match WorldView.RiverX.
+// hedges and ink lines between them on the low land, grassier hills, rocky faceted mountain
+// slopes with a snow or pale rock cap, all painted from the world position and normal; and the
+// water (river, lakes) where UV.x < 0: bright blue with soft foam at the shore and animated
+// ripples. UV.x is set by WorldView: height above the water on land, minus the depth on water.
 shader_type spatial;
 render_mode specular_disabled;
 
 #include "res://modules/World/Godot/Toon.gdshaderinc"
 
-uniform float river_half_width = 22.0;
+uniform float snow_line = 192.0;
+uniform float pale_line = 150.0;
 uniform float ink_fade_start = 500.0;
 uniform float ink_fade_end = 1600.0;
 
@@ -21,14 +24,25 @@ const vec3 FIELDS[7] = vec3[7](
 );
 const vec3 HEDGE = vec3(0.30, 0.52, 0.25);
 const vec3 INK = vec3(0.13, 0.10, 0.14);
-const vec3 WATER = vec3(0.30, 0.66, 0.82);
-const vec3 WATER_LIGHT = vec3(0.62, 0.88, 0.95);
+const vec3 MEADOW = vec3(0.45, 0.72, 0.32);
+const vec3 ROCK = vec3(0.68, 0.60, 0.52);
+const vec3 ROCK_DARK = vec3(0.56, 0.49, 0.44);
+const vec3 PALE_ROCK = vec3(0.80, 0.77, 0.71);
+const vec3 SNOW = vec3(0.96, 0.98, 1.0);
+const vec3 WATER = vec3(0.16, 0.56, 0.90);
+const vec3 WATER_SHALLOW = vec3(0.36, 0.78, 0.95);
+const vec3 WATER_LIGHT = vec3(0.70, 0.92, 1.0);
+const vec3 FOAM = vec3(0.95, 0.98, 1.0);
 const vec3 BANK = vec3(0.90, 0.84, 0.58);
 
 varying vec3 world_pos;
+varying vec3 world_normal;
+varying float shore;
 
 void vertex() {
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	world_normal = (MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz;
+	shore = UV.x;
 }
 
 float hash(vec2 p) {
@@ -43,20 +57,6 @@ float noise(vec2 p) {
 	f = f * f * (3.0 - 2.0 * f);
 	return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
 		mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-
-// Same curve as WorldView.RiverX / RiverSlope.
-float river_x(float z) {
-	return 260.0 * sin(z * 0.0011 + 0.6) + 120.0 * sin(z * 0.0029 + 2.1) + 40.0 * sin(z * 0.0071);
-}
-
-float river_slope(float z) {
-	return 0.286 * cos(z * 0.0011 + 0.6) + 0.348 * cos(z * 0.0029 + 2.1) + 0.284 * cos(z * 0.0071);
-}
-
-float river_distance(vec2 p) {
-	float s = river_slope(p.y);
-	return abs(p.x - river_x(p.y)) / sqrt(1.0 + s * s);
 }
 
 // Thin line of about width meters (at least ~1 pixel, anti-aliased) where d is near 0.
@@ -102,15 +102,41 @@ void fragment() {
 	color = mix(color, HEDGE, line(edge, 1.4));
 	color = mix(color, INK, line(abs(edge - 1.6), 0.3) * 0.8 * ink_fade);
 
-	// River: sandy banks, water with light ripple lines, an ink line along each bank.
-	float rd = river_distance(p);
-	float bank = river_half_width + 6.0;
-	color = mix(color, BANK, 1.0 - smoothstep(bank, bank + max(fwidth(rd), 0.01), rd));
-	float water = 1.0 - smoothstep(river_half_width, river_half_width + max(fwidth(rd), 0.01), rd);
-	float ripples = step(0.93, sin(p.y * 0.12 + sin(p.x * 0.05) * 2.0 + rd * 0.4)) * step(rd, river_half_width - 4.0);
-	vec3 water_color = mix(WATER, WATER_LIGHT, ripples * 0.7 + 0.25 * (1.0 - smoothstep(0.0, river_half_width, rd)));
+	// Hills: the patchwork fades into meadow as the land rises.
+	float y = world_pos.y;
+	color = mix(color, MEADOW * (0.9 + 0.2 * noise(p * 0.01)), smoothstep(14.0, 40.0, y) * 0.65);
+
+	// Mountains: rock on the high and steep ground, banded in cartoon strata, drawn with flat
+	// facets (the triangle's own normal) for a low-poly look; snow or pale rock on the tops.
+	float steep = 1.0 - smoothstep(0.62, 0.8, normalize(world_normal).y);
+	float rock = max(smoothstep(48.0, 80.0, y), steep * smoothstep(28.0, 48.0, y));
+	float strata = step(0.5, fract(y / 17.0 + 0.6 * noise(p * 0.012)));
+	color = mix(color, mix(ROCK_DARK, ROCK, strata) * (0.92 + 0.16 * noise(p * 0.04)), rock);
+	color = mix(color, PALE_ROCK, smoothstep(pale_line - 8.0, pale_line + 8.0, y + 14.0 * noise(p * 0.02)));
+	color = mix(color, SNOW, smoothstep(snow_line - 2.0, snow_line + 2.0, y + 16.0 * noise(p * 0.018) - 6.0 * steep));
+	vec3 facet = normalize(cross(dFdy(VERTEX), dFdx(VERTEX)));
+	NORMAL = normalize(mix(NORMAL, facet, rock));
+
+	// Shores: a sandy strip, then the water: deeper blue offshore, soft foam along the shore
+	// that breathes in and out, gentle drifting ripple lines, an ink line at the water's edge.
+	float aa = max(fwidth(shore), 0.01);
+	color = mix(color, BANK, 1.0 - smoothstep(0.7, 0.7 + aa, shore));
+	float depth = -shore;
+	float water = smoothstep(-aa, 0.0, depth);
+	float t = TIME;
+	vec3 water_color = mix(WATER_SHALLOW, WATER, smoothstep(0.0, 1.6, depth));
+	float wave = sin(p.x * 0.07 + 2.2 * sin(p.y * 0.031 + t * 0.35) + t * 0.9)
+		* sin(p.y * 0.055 - t * 0.6 + 1.8 * sin(p.x * 0.027 - t * 0.25));
+	float ripples = smoothstep(0.55, 0.8, wave) * (1.0 - smoothstep(600.0, 1500.0, view_distance));
+	water_color = mix(water_color, WATER_LIGHT, ripples * 0.55);
+	float foam_edge = 0.35 + 0.18 * sin(t * 1.2 + p.x * 0.045 + p.y * 0.035);
+	float foam = 1.0 - smoothstep(foam_edge * 0.5, foam_edge + 0.25, depth);
+	water_color = mix(water_color, FOAM, foam * 0.85);
 	color = mix(color, water_color, water);
-	color = mix(color, INK, line(abs(rd - river_half_width), 0.5) * ink_fade);
+	color = mix(color, INK, line(abs(shore), 0.04) * 0.6 * ink_fade);
+	if (depth > 0.0) {
+		NORMAL = normalize((VIEW_MATRIX * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
+	}
 
 	ALBEDO = color;
 }
