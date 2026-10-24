@@ -13,13 +13,41 @@ public class FlightModuleTests
     private const double Dt = 1.0 / 60.0;
     private const float Deg = MathF.PI / 180f;
 
+    /// <summary>World's playable half-size (m), read at run time: every map distance in these tests is a share of it.</summary>
+    private static float Half => Neo.World.WorldBounds.HalfSize;
+
+    /// <summary>Plane <paramref name="id"/>'s spawn for its <paramref name="count"/>th time (0: the start).</summary>
+    private static (Vector3 Position, Quaternion Orientation) SpawnOf(int id, int count = 0)
+    {
+        FlightModel.SpawnPoint(id, count, out Vector3 position, out Quaternion orientation);
+        return (position, orientation);
+    }
+
+    /// <summary>Plane 0's start heading (level): the frame <see cref="Aim"/> directions are given in (-Z ahead, +X right).</summary>
+    private static readonly Quaternion Start0 = SpawnOf(0).Orientation;
+
+    /// <summary>The direction <paramref name="local"/> of plane 0's start frame (-Z ahead, +X right, +Y up) in the world.</summary>
+    private static Vector3 Ahead(Vector3 local) => Vector3.Transform(local, Start0);
+
     private sealed class Rig
     {
         public readonly TestBus Bus = new();
         public readonly FlightModule Module = new();
         private long _tick;
 
-        public Rig() => Module.Start(Bus);
+        /// <summary>A module started on a fake bus. With <paramref name="room"/>, plane 0 is first moved (heading and height
+        /// kept) to 0.8 x HalfSize behind the center on its line toward it, so it has 1.8 x HalfSize of straight
+        /// flight ahead before the edge; otherwise all planes are at their spawn points.</summary>
+        public Rig(bool room = true)
+        {
+            Module.Start(Bus);
+            if (!room)
+                return;
+            FlightModel plane = Module.Plane(0);
+            Vector3 ahead = plane.Forward;
+            Vector3 target = new Vector3(-ahead.X, 0f, -ahead.Z) * (0.8f * Half);
+            plane.ApplyImpulse(Vector3.Zero, Vector3.Zero, new Vector3(target.X - plane.Position.X, 0f, target.Z - plane.Position.Z));
+        }
 
         public PlaneState Step(in ControlInput input)
         {
@@ -57,8 +85,48 @@ public class FlightModuleTests
     private static ControlInput Sticks(float pitch = 0f, float roll = 0f, float yaw = 0f, float throttle = 0.5f) =>
         new(0, pitch, roll, yaw, throttle, false, false, Vector3.Zero);
 
+    /// <summary>Mouse aim for plane 0 toward <paramref name="direction"/> in plane 0's start frame (see <see cref="Ahead"/>).</summary>
     private static ControlInput Aim(Vector3 direction, float throttle = 0.5f) =>
+        new(0, 0f, 0f, 0f, throttle, false, true, Ahead(direction));
+
+    /// <summary>Mouse aim for plane 0 toward the world direction <paramref name="direction"/>.</summary>
+    private static ControlInput AimWorld(Vector3 direction, float throttle = 0.5f) =>
         new(0, 0f, 0f, 0f, throttle, false, true, direction);
+
+    /// <summary>
+    /// World aim that flies plane <paramref name="s"/> round a circle of 0.4 x HalfSize about the center
+    /// (counter-clockwise seen from above), steering onto it from wherever it is, <paramref name="rise"/> up
+    /// (1 is 45 degrees): long flights stay well inside the area, whatever the map's size.
+    /// </summary>
+    private static Vector3 Orbit(in PlaneState s, float rise = 0f)
+    {
+        float radius = 0.4f * Half;
+        var flat = new Vector3(s.Position.X, 0f, s.Position.Z);
+        float r = flat.Length();
+        Vector3 outward = r > 1f ? flat / r : Vector3.UnitX;
+        Vector3 tangent = Vector3.Cross(Vector3.UnitY, outward); // counter-clockwise
+        Vector3 horizontal = Vector3.Normalize(tangent - outward * Math.Clamp((r - radius) / (0.25f * radius), -2f, 2f));
+        return Vector3.Normalize(horizontal + new Vector3(0f, rise, 0f));
+    }
+
+    /// <summary>Flies plane 0 round the <see cref="Orbit"/> for <paramref name="seconds"/>, checking every state.</summary>
+    private static PlaneState FlyOrbit(Rig rig, float throttle, float seconds, float rise = 0f, Action<PlaneState>? check = null)
+    {
+        for (int i = 0; i < (int)MathF.Round(seconds * 60f); i++)
+        {
+            var s = rig.Step(AimWorld(Orbit(rig.Module.Plane(0).State, rise), throttle));
+            check?.Invoke(s);
+        }
+        return rig.Bus.States[0];
+    }
+
+    /// <summary>World aim along plane <paramref name="s"/>'s heading, <paramref name="degrees"/> up (negative: down).</summary>
+    private static Vector3 Pitched(in PlaneState s, float degrees)
+    {
+        Vector3 f = Forward(s);
+        var flat = Vector3.Normalize(new Vector3(f.X, 0f, f.Z));
+        return Vector3.Normalize(flat * MathF.Cos(degrees * Deg) + Vector3.UnitY * MathF.Sin(degrees * Deg));
+    }
 
     private static Vector3 Forward(in PlaneState s) => Vector3.Transform(-Vector3.UnitZ, s.Orientation);
 
@@ -99,39 +167,99 @@ public class FlightModuleTests
         Assert.Equal(3, new PlaneState(3, Vector3.Zero, Quaternion.Identity, Vector3.Zero, 0f, 0f, false).PlaneId);
     }
 
-    [Fact]
-    public void AllEightPlanesStartByTeam_AlliesSouthHeadingNorth_CentralNorthHeadingSouth()
+    /// <summary>Checks one spawn of plane <paramref name="id"/>: on its team's half, inside the area, at 350..450 m and
+    /// at least 150 m above the terrain there, level, heading toward the center within 30 degrees.</summary>
+    private static void AssertSpawn(int id, Vector3 p, Quaternion q)
     {
-        var rig = new Rig();
-        rig.Tick();
+        float side = Teams.IsAllies(id) ? 1f : -1f; // Allies south (+Z), Central north (-Z)
+        Assert.InRange(p.Z * side, 0.3f * Half - 0.01f, 0.85f * Half + 0.01f);
+        Assert.InRange(p.X, -0.85f * Half - 0.01f, 0.85f * Half + 0.01f);
+        Assert.InRange(p.Y, FlightModel.SpawnMinAltitude, FlightModel.SpawnMaxAltitude);
+        Assert.True(p.Y - Neo.World.Terrain.HeightAt(p.X, p.Z) >= 150f - 0.01f, $"plane {id} at {p}: too close to the ground");
+        Assert.True(Vector3.Transform(Vector3.UnitY, q).Y > 0.9999f, "level");
+        var forward = Vector3.Transform(-Vector3.UnitZ, q);
+        Assert.True(AngleBetween(forward, new Vector3(-p.X, 0f, -p.Z)) <= 30f * Deg + 1e-3f,
+            $"plane {id} at {p} heads {AngleBetween(forward, new Vector3(-p.X, 0f, -p.Z)) / Deg} deg off the center");
+    }
 
+    [Fact]
+    public void AllEightPlanesStartOnTheirOwnHalf_HighClearOfTheGround_HeadingForTheCenter_AtFullSpeed()
+    {
+        Assert.Equal(350f, FlightModel.SpawnMinAltitude);
+        Assert.Equal(450f, FlightModel.SpawnMaxAltitude);
+        Assert.Equal(150f, FlightModel.SpawnClearance);
+        var rig = new Rig(room: false);
+        for (int id = 0; id < 8; id++)
+        {
+            var spawn = SpawnOf(id);
+            AssertSpawn(id, spawn.Position, spawn.Orientation);
+            Assert.Equal(spawn.Position, rig.Module.Plane(id).Position);
+            Assert.Equal(spawn.Orientation, rig.Module.Plane(id).Orientation);
+            Assert.Equal(FlightModel.MaxSpeed, rig.Module.Plane(id).Speed);
+            Assert.Equal(0, rig.Module.Plane(id).RespawnCount);
+        }
+        rig.Tick();
         Assert.Equal(8, rig.Bus.StatesPublished);
         for (int id = 0; id < 8; id++)
         {
             var s = rig.Bus.States[id];
-            bool allies = id < 4;
             Assert.Equal(id, s.PlaneId);
             Assert.True(s.Alive);
-            Assert.InRange(s.Position.Y, 399.9f, 400.1f);
-            // About 1500 m south (+Z) for Allies, north (-Z) for Central, one step flown.
-            Assert.InRange(s.Position.Z * (allies ? 1f : -1f), 1498f, 1500f);
-            Assert.True(AngleBetween(Forward(s), allies ? -Vector3.UnitZ : Vector3.UnitZ) < 0.01f);
-            Assert.InRange(s.Speed, 41f, 43f);
+            // One step flown from its spawn, at full speed.
+            var spawn = SpawnOf(id);
+            Assert.True(Vector3.Distance(s.Position, spawn.Position + Forward(s) * s.Speed * (float)Dt) < 0.01f, $"plane {id} at {s.Position}");
+            Assert.InRange(s.Speed, FlightModel.MaxSpeed - 0.5f, FlightModel.MaxSpeed);
             Assert.InRange(s.Velocity.Length(), s.Speed - 0.01f, s.Speed + 0.01f);
-            Assert.True(Vector3.Transform(Vector3.UnitY, s.Orientation).Y > 0.999f, "level");
         }
-        // Side by side, about 60 m apart, around the center line.
-        for (int team = 0; team < 8; team += 4)
+    }
+
+    [Fact]
+    public void Spawns_EveryRespawnOnTheTeamsHalf_Spread_Random_Deterministic()
+    {
+        const int Count = 200;
+        for (int id = 0; id < 8; id++)
         {
-            float sumX = 0f;
-            for (int i = 0; i < 4; i++)
+            float minX = float.MaxValue, maxX = float.MinValue, minZ = float.MaxValue, maxZ = float.MinValue;
+            float minY = float.MaxValue, maxY = float.MinValue, minTurn = float.MaxValue, maxTurn = float.MinValue;
+            var previous = SpawnOf(id, 0);
+            for (int count = 0; count < Count; count++)
             {
-                sumX += rig.Bus.States[team + i].Position.X;
-                if (i > 0)
-                    Assert.InRange(rig.Bus.States[team + i].Position.X - rig.Bus.States[team + i - 1].Position.X, 59f, 61f);
+                var spawn = SpawnOf(id, count);
+                var p = spawn.Position;
+                AssertSpawn(id, p, spawn.Orientation);
+                // Deterministic: the same id and count, the same spawn, whatever else used System.Random meanwhile.
+                Random.Shared.Next();
+                Assert.Equal(spawn, SpawnOf(id, count));
+                // Different on each respawn.
+                if (count > 0)
+                    Assert.True(Vector3.Distance(previous.Position, p) > 1f, $"plane {id} respawn {count} at the same place");
+                previous = spawn;
+                minX = MathF.Min(minX, p.X); maxX = MathF.Max(maxX, p.X);
+                minZ = MathF.Min(minZ, MathF.Abs(p.Z)); maxZ = MathF.Max(maxZ, MathF.Abs(p.Z));
+                minY = MathF.Min(minY, p.Y); maxY = MathF.Max(maxY, p.Y);
+                // Signed turn of the heading off the line to the center (positive: to the right).
+                Vector3 f = Vector3.Transform(-Vector3.UnitZ, spawn.Orientation);
+                float turn = MathF.Atan2(-p.X * f.Z + p.Z * f.X, -p.X * f.X - p.Z * f.Z);
+                minTurn = MathF.Min(minTurn, turn); maxTurn = MathF.Max(maxTurn, turn);
             }
-            Assert.InRange(sumX / 4f, -1f, 1f);
+            // Random over the plane's part of its half: its depth, its lane across, the height and the heading.
+            Assert.True(minZ < 0.4f * Half && maxZ > 0.75f * Half, $"plane {id}: |z| {minZ}..{maxZ}");
+            Assert.True(maxX - minX > 0.2f * Half, $"plane {id}: x {minX}..{maxX}");
+            Assert.True(minY < 370f && maxY > 430f, $"plane {id}: height {minY}..{maxY}");
+            Assert.True(minTurn < -20f * Deg && maxTurn > 20f * Deg, $"plane {id}: heading {minTurn / Deg}..{maxTurn / Deg} deg");
         }
+        // Planes of a team spawning together (the same count) are at least 100 m apart.
+        for (int count = 0; count < Count; count++)
+            for (int a = 0; a < 8; a++)
+                for (int b = a + 1; b < 8; b++)
+                    if (Teams.IsAllies(a) == Teams.IsAllies(b))
+                        Assert.True(Vector3.Distance(SpawnOf(a, count).Position, SpawnOf(b, count).Position) >= 100f,
+                            $"planes {a} and {b} spawn {count}: {SpawnOf(a, count).Position} {SpawnOf(b, count).Position}");
+        // Two modules start the same.
+        var one = new FlightModule();
+        var two = new FlightModule();
+        for (int id = 0; id < 8; id++)
+            Assert.Equal(one.Plane(id).State, two.Plane(id).State);
     }
 
     [Fact]
@@ -144,7 +272,7 @@ public class FlightModuleTests
         Assert.Equal(16, rig.Bus.StatesPublished);
         for (int i = 0; i < 8; i++)
             Assert.Equal(i, rig.Bus.Order[i]);
-        Assert.True(second.Position.Z < first.Position.Z);
+        Assert.True(Vector3.Dot(second.Position - first.Position, Forward(first)) > 0.5f, "flew on ahead");
     }
 
     [Fact]
@@ -168,9 +296,9 @@ public class FlightModuleTests
             Assert.InRange(s.Velocity.Length(), s.Speed - 0.01f, s.Speed + 0.01f);
         }
 
-        // Full-throttle dive, then a full-throttle-off climb.
+        // Full-throttle dive (until near the ground), then a full-throttle-off climb.
         var rig = new Rig();
-        rig.Fly(Aim(Vector3.Normalize(new Vector3(0f, -1f, -0.3f)), throttle: 1f), 6f, InRange);
+        rig.Fly(Aim(Vector3.Normalize(new Vector3(0f, -1f, -0.3f)), throttle: 1f), 4.5f, InRange);
         rig = new Rig();
         var climb = rig.Fly(Aim(Vector3.Normalize(new Vector3(0f, 1f, -0.2f)), throttle: 0f), 20f, InRange);
         Assert.InRange(climb.Speed, 25f, 26f); // slowed to the minimum, still flying
@@ -193,13 +321,13 @@ public class FlightModuleTests
         Assert.True(flying > 60 * 60, $"flew {flying} steps");
     }
 
-    /// <summary>Plane 0 and plane 1 (side by side) fly the same aim for <paramref name="seconds"/>.</summary>
-    private static void FlyPair(Rig rig, Vector3 aim, float throttle, float seconds, Action<PlaneState, PlaneState>? check = null)
+    /// <summary>Plane 0 and plane 1 each fly the world aim <paramref name="aim"/> gives for their state for <paramref name="seconds"/>.</summary>
+    private static void FlyPair(Rig rig, Func<PlaneState, Vector3> aim, float throttle, float seconds, Action<PlaneState, PlaneState>? check = null)
     {
         for (int i = 0; i < (int)MathF.Round(seconds * 60f); i++)
         {
-            rig.Bus.Publish(Aim(aim, throttle));
-            rig.Bus.Publish(new ControlInput(1, 0f, 0f, 0f, throttle, false, true, aim));
+            rig.Bus.Publish(AimWorld(aim(rig.Module.Plane(0).State), throttle));
+            rig.Bus.Publish(new ControlInput(1, 0f, 0f, 0f, throttle, false, true, aim(rig.Module.Plane(1).State)));
             rig.Tick();
             check?.Invoke(rig.Bus.States[0], rig.Bus.States[1]);
         }
@@ -277,29 +405,28 @@ public class FlightModuleTests
         }
     }
 
-    /// <summary>Aims level (or <paramref name="rise"/> up: 1 is 45 degrees), the heading turning slowly
-    /// (6 deg/s) from north: a wide circle.</summary>
-    private static PlaneState FlyLevelCircle(Rig rig, float throttle, float seconds, ref float t, float rise = 0f, Action<PlaneState>? check = null)
+    /// <summary>A new rig whose plane 0 has climbed round the <see cref="Orbit"/> at 15 degrees, full throttle, to
+    /// <paramref name="altitude"/> m.</summary>
+    private static Rig ClimbOrbit(float altitude)
     {
-        for (int i = 0; i < (int)MathF.Round(seconds * 60f); i++, t += (float)Dt)
-        {
-            var s = rig.Step(Aim(Vector3.Normalize(new Vector3(MathF.Sin(6f * Deg * t), rise, -MathF.Cos(6f * Deg * t))), throttle));
-            check?.Invoke(s);
-        }
-        return rig.Bus.States[0];
+        var rig = new Rig();
+        float rise = MathF.Tan(15f * Deg);
+        for (int i = 0; i < 60 * 240 && rig.Bus.States[0].Position.Y < altitude; i++)
+            rig.Step(AimWorld(Orbit(rig.Module.Plane(0).State, rise), 1f));
+        Assert.True(rig.Bus.States[0].Position.Y >= altitude, "climbed up");
+        return rig;
     }
 
     [Fact]
     public void Gravity_DiveBuildsSpeedPastTheMaxUpToTheCap_LevelFlightSettlesBackAtTheThrottleSpeed()
     {
         Assert.InRange(FlightModel.DiveMaxSpeed, 80f, 90f);
-        var rig = ClimbTo(15f, 900f, out _);
-        float t0 = 0f;
-        FlyLevelCircle(rig, 1f, 30f, ref t0); // speed back (the engine is weaker up here), clear of the border
+        var rig = ClimbOrbit(900f);
+        FlyOrbit(rig, 1f, 30f); // speed back (the engine is weaker up here), clear of the border
         float top = 0f, previous = rig.Bus.States[0].Speed;
         Vector3 ahead = Forward(rig.Bus.States[0]) * new Vector3(1f, 0f, 1f);
         // (High up the engine's level max is lower, so drag starts earlier: the dive needs a little longer.)
-        var s = rig.Fly(Aim(Vector3.Normalize(ahead * 0.1f - Vector3.UnitY), throttle: 1f), 8f, p =>
+        var s = rig.Fly(AimWorld(Vector3.Normalize(ahead * 0.1f - Vector3.UnitY), throttle: 1f), 8f, p =>
         {
             Assert.True(p.Speed <= FlightModel.DiveMaxSpeed, $"capped: {p.Speed}");
             Assert.InRange(p.Velocity.Length(), p.Speed - 0.01f, p.Speed + 0.01f);
@@ -312,20 +439,19 @@ public class FlightModuleTests
         Assert.True(top > FlightModel.MaxSpeed + 20f, $"dived to {top} m/s");
         Assert.True(top >= FlightModel.DiveMaxSpeed - 0.5f, $"reaches the cap: {top} m/s");
 
-        // Level again (a wide level circle, clear of the border): drag brings it back to the throttle's speed, gradually.
-        float t = 0f;
-        s = FlyLevelCircle(rig, 1f, 2f, ref t);
+        // Level again (round the orbit, clear of the border): drag brings it back to the throttle's speed, gradually.
+        s = FlyOrbit(rig, 1f, 2f);
         Assert.True(s.Speed > FlightModel.MaxSpeed + 5f, $"keeps its dive speed a while: {s.Speed}");
-        s = FlyLevelCircle(rig, 1f, 30f, ref t);
+        s = FlyOrbit(rig, 1f, 30f);
         Assert.InRange(s.Speed, FlightModel.MaxSpeed - 0.5f, FlightModel.MaxSpeed + 0.5f);
-        s = FlyLevelCircle(rig, 0.5f, 20f, ref t);
+        s = FlyOrbit(rig, 0.5f, 20f);
         Assert.InRange(s.Speed, FlightModel.CruiseSpeed - 0.5f, FlightModel.CruiseSpeed + 0.5f);
 
         // A dive at cruise throttle speeds up too, but less.
-        rig = ClimbTo(15f, 900f, out _);
-        rig.Fly(Aim(Level, throttle: 0.5f), 20f);
+        rig = ClimbOrbit(900f);
+        FlyOrbit(rig, 0.5f, 20f);
         top = 0f;
-        rig.Fly(Aim(Vector3.Normalize(new Vector3(0f, -1f, -1f)), throttle: 0.5f), 5f, p => top = MathF.Max(top, p.Speed));
+        rig.Fly(AimWorld(Pitched(rig.Bus.States[0], -45f), throttle: 0.5f), 5f, p => top = MathF.Max(top, p.Speed));
         Assert.InRange(top, FlightModel.CruiseSpeed + 5f, FlightModel.DiveMaxSpeed - 5f);
     }
 
@@ -338,7 +464,7 @@ public class FlightModuleTests
     {
         var aim = Vector3.Normalize(new Vector3(x, y, z));
         var rig = new Rig();
-        rig.Fly(Sticks(), 10f); // away from the start near the south border, so turning back stays clear of it
+        rig.Fly(Sticks(), 10f); // on toward the center first, so turning back stays clear of the border
         var previous = rig.Step(Aim(aim));
         float maxTurnPerStep = (FlightModel.RollRate + FlightModel.PitchRate + FlightModel.YawRate + FlightModel.BankTurnRate) * (float)Dt;
         rig.Fly(Aim(aim), 10f, s =>
@@ -346,10 +472,10 @@ public class FlightModuleTests
             Assert.True(RotationAngle(previous.Orientation, s.Orientation) <= maxTurnPerStep + 1e-4f);
             previous = s;
         });
-        Assert.True(AngleBetween(Forward(rig.Bus.States[0]), aim) < 2f * Deg,
-            $"still {AngleBetween(Forward(rig.Bus.States[0]), aim) / Deg} deg off");
+        Assert.True(AngleBetween(Forward(rig.Bus.States[0]), Ahead(aim)) < 2f * Deg,
+            $"still {AngleBetween(Forward(rig.Bus.States[0]), Ahead(aim)) / Deg} deg off");
         // And it stays there.
-        rig.Fly(Aim(aim), 2f, s => Assert.True(AngleBetween(Forward(s), aim) < 3f * Deg));
+        rig.Fly(Aim(aim), 2f, s => Assert.True(AngleBetween(Forward(s), Ahead(aim)) < 3f * Deg));
     }
 
     [Fact]
@@ -543,7 +669,7 @@ public class FlightModuleTests
         rig = new Rig();
         var aim = Vector3.Normalize(new Vector3(0f, 0.5f, -1f));
         s = rig.Fly(Aim(aim), 8f);
-        Assert.True(AngleBetween(Forward(s), aim) < 3f * Deg);
+        Assert.True(AngleBetween(Forward(s), Ahead(aim)) < 3f * Deg);
     }
 
     [Theory]
@@ -592,7 +718,7 @@ public class FlightModuleTests
                 Assert.True(Clearance(previous) > 0f, "flew until its lowest point reached the ground");
                 return s;
             }
-            Assert.Equal(0, rig.Bus.CrashCount);
+            Assert.Equal(0, rig.Bus.CrashCountOf[id]);
             Assert.True(Clearance(s) > 0f, $"alive below ground at {s.Position}");
             previous = s;
         }
@@ -605,8 +731,8 @@ public class FlightModuleTests
         Assert.False(s.Alive);
         Assert.Equal(Neo.World.Terrain.HeightAt(s.Position.X, s.Position.Z), s.Position.Y);
         Assert.Equal(Vector3.Zero, s.Velocity);
-        Assert.Equal(1, rig.Bus.CrashCount);
-        var crash = rig.Bus.Crashes[0];
+        Assert.Equal(1, rig.Bus.CrashCountOf[id]);
+        var crash = rig.Bus.LastCrashOf[id];
         Assert.Equal(id, crash.PlaneId);
         Assert.Equal(s.Position, crash.Position);
         Assert.True(crash.Speed >= minSpeed, $"hit at {crash.Speed} m/s");
@@ -620,7 +746,7 @@ public class FlightModuleTests
             Assert.Equal(s.Position, p.Position);
             Assert.Equal(Vector3.Zero, p.Velocity);
         });
-        Assert.Equal(1, rig.Bus.CrashCount);
+        Assert.Equal(1, rig.Bus.CrashCountOf[id]);
     }
 
     [Theory]
@@ -628,9 +754,10 @@ public class FlightModuleTests
     [InlineData(5)]
     public void Crash_DivingPlaneHitsTheGroundAtTheTerrainHeight_OnePlaneCrashed(int id)
     {
-        // Stick held full forward, full throttle, player and bot: no pull-up, it flies into the ground.
+        // Stick full forward into a steep dive, then held there hands off, full throttle, player and bot: no pull-up,
+        // it flies into the ground.
         var rig = new Rig();
-        var s = FlyUntilCrash(rig, _ => new ControlInput(id, -1f, 0f, 0f, 1f, false, false, Vector3.Zero));
+        var s = FlyUntilCrash(rig, p => new ControlInput(id, Climb(p) > -60f * Deg ? -1f : 0f, 0f, 0f, 1f, false, false, Vector3.Zero));
         AssertCrashedOnTheGround(rig, id, s, 40f);
         for (int other = 0; other < Teams.PlaneCount; other++)
             Assert.Equal(other != id, rig.Bus.States[other].Alive);
@@ -639,12 +766,25 @@ public class FlightModuleTests
     [Fact]
     public void Crash_IntoAHillsideStopsAtTheHillsHeight()
     {
-        // Mouse aimed at the top of World's mountain north-west of the Allies' start: it hits the slope.
-        var peak = new Vector3(-850f, 0f, 950f);
-        peak.Y = Neo.World.Terrain.HeightAt(peak.X, peak.Z);
+        // World's highest peak inside the map (found by sampling its terrain), with plane 0 moved 0.3 x HalfSize
+        // from it toward the center, at its height: mouse aimed at the peak, it hits the slope.
+        var peak = Vector3.Zero;
+        float step = Half / 50f;
+        for (float x = -0.9f * Half; x <= 0.9f * Half; x += step)
+            for (float z = -0.9f * Half; z <= 0.9f * Half; z += step)
+            {
+                float h = Neo.World.Terrain.HeightAt(x, z);
+                if (h > peak.Y && h < FlightModel.SpawnMinAltitude - 50f)
+                    peak = new Vector3(x, h, z);
+            }
+        Assert.True(peak.Y > 80f, $"a hill to fly into: {peak}");
         var rig = new Rig();
-        var s = FlyUntilCrash(rig, p => Aim(Vector3.Normalize(peak - p.Position), throttle: 1f));
+        var plane = rig.Module.Plane(0);
+        var from = new Vector3(peak.X, 0f, peak.Z) * (1f - 0.3f * Half / new Vector3(peak.X, 0f, peak.Z).Length());
+        plane.ApplyImpulse(Vector3.Zero, Vector3.Zero, new Vector3(from.X - plane.Position.X, 0f, from.Z - plane.Position.Z));
+        var s = FlyUntilCrash(rig, p => AimWorld(Vector3.Normalize(peak - p.Position), throttle: 1f));
         Assert.True(s.Position.Y > 50f, $"on the hill at {s.Position}");
+        Assert.True(Vector3.Distance(s.Position * new Vector3(1f, 0f, 1f), peak * new Vector3(1f, 0f, 1f)) < 0.15f * Half, $"near the peak {peak}: {s.Position}");
         AssertCrashedOnTheGround(rig, 0, s, 30f);
     }
 
@@ -678,25 +818,50 @@ public class FlightModuleTests
     [Fact]
     public void FlyingLowAboveTheGroundIsFine()
     {
-        // Plane 0 descends toward the open center (the plain), to 60 m, then to 9 m (7.5 m between its lowest
-        // point and the plain, at most 5 m high there): well inside the old floor guard's 60 m.
+        // Plane 0 gets down round the orbit, then heads for the open center (the plain), 40 m above the highest
+        // ground ahead; once the ground from
+        // there to beyond the center is all plain (or water: 5 m at most), down to 9 m (7.5 m between its lowest
+        // point and the plain): well inside the old floor guard's 60 m.
         const float low = 9f;
         var rig = new Rig();
         rig.Tick();
-        ControlInput Hold(PlaneState p, float height)
+        ControlInput Hold(PlaneState p, float height, bool orbit = false)
         {
             float rise = Math.Clamp((height - p.Position.Y) * 0.02f, -0.4f, 0.4f);
-            return Aim(Vector3.Normalize(new Vector3(0f, rise, -1f)));
+            var center = orbit ? Orbit(p) : Vector3.Normalize(new Vector3(-p.Position.X, 0f, -p.Position.Z));
+            return AimWorld(Vector3.Normalize(center + new Vector3(0f, rise, 0f)));
         }
-        for (int i = 0; i < 60 * 60 && rig.Bus.States[0].Position.Z > 400f; i++)
-            rig.Step(Hold(rig.Bus.States[0], 60f));
-        for (int i = 0; i < 60 * 60 && rig.Bus.States[0].Position.Z > 0f; i++)
+        float GroundAhead(PlaneState p)
+        {
+            float ground = 0f;
+            for (float d = 0f; d <= 300f; d += 10f)
+                ground = MathF.Max(ground, Neo.World.Terrain.HeightAt(p.Position.X + Forward(p).X * d, p.Position.Z + Forward(p).Z * d));
+            return ground;
+        }
+        // Highest ground (m) on the straight line from p to the center and 0.15 x HalfSize beyond it.
+        float GroundToCenter(Vector3 p, float beyond)
+        {
+            float highest = 0f;
+            for (float f = 0f; f <= 1f + beyond / new Vector3(p.X, 0f, p.Z).Length(); f += 0.01f)
+                highest = MathF.Max(highest, Neo.World.Terrain.HeightAt(p.X * (1f - f), p.Z * (1f - f)));
+            return highest;
+        }
+        // Down low round the orbit first, then toward the center.
+        for (int i = 0; i < 60 * 40; i++)
+            Assert.True(rig.Step(Hold(rig.Bus.States[0], GroundAhead(rig.Bus.States[0]) + 40f, orbit: true)).Alive);
+        for (int i = 0; i < 60 * 120 && GroundToCenter(rig.Bus.States[0].Position, 0.15f * Half) > 5f; i++)
+            Assert.True(rig.Step(Hold(rig.Bus.States[0], GroundAhead(rig.Bus.States[0]) + 40f)).Alive);
+        Assert.True(GroundToCenter(rig.Bus.States[0].Position, 0.15f * Half) <= 5f, "found the open plain");
+        Vector3 through = Vector3.Normalize(-rig.Bus.States[0].Position * new Vector3(1f, 0f, 1f)); // its line over the center
+        float approach = -Vector3.Dot(rig.Bus.States[0].Position, through);
+        Assert.True(approach > 400f, $"room to get down: {approach} m");
+        for (int i = 0; i < 60 * 60 && Vector3.Dot(rig.Bus.States[0].Position, through) < 0f; i++)
         {
             var p = rig.Step(Hold(rig.Bus.States[0], low));
             Assert.True(p.Alive && Clearance(p) > 2f, $"at {p.Position}");
         }
         var s = rig.Bus.States[0];
-        Assert.InRange(s.Position.Y, low - 1f, low + 1f);
+        Assert.True(MathF.Abs(s.Position.Y - low) < 1f, $"at {s.Position}, approach {approach}");
 
         // ...then flies on hands off over the center: no pull-up, no crash, it keeps its height.
         float lowest = float.MaxValue, highest = float.MinValue;
@@ -709,15 +874,15 @@ public class FlightModuleTests
         });
         Assert.True(highest - lowest < 2f, $"height {lowest}..{highest} m: no pull-up");
         Assert.True(highest < low + 2f, "never pulled up");
-        Assert.True(rig.Bus.States[0].Position.Z < -200f, "flew on over the center");
-        Assert.Equal(0, rig.Bus.CrashCount);
+        Assert.True(Vector3.Dot(rig.Bus.States[0].Position, through) > 0.1f * Half, "flew on over the center");
+        Assert.Equal(0, rig.Bus.CrashCountOf[0]);
     }
 
     [Fact]
     public void Crash_RespawnRestoresThePlane_ItCanCrashAgain()
     {
         var rig = new Rig();
-        FlyUntilCrash(rig, _ => Sticks(pitch: -1f, throttle: 1f));
+        FlyUntilCrash(rig, p => Sticks(pitch: Climb(p) > -60f * Deg ? -1f : 0f, throttle: 1f));
         rig.Run(2f);
         Assert.False(rig.Bus.States[0].Alive);
 
@@ -725,37 +890,18 @@ public class FlightModuleTests
         var s = rig.Step(Sticks());
         Assert.True(s.Alive);
         Assert.False(rig.Module.Model.Grounded);
-        Assert.True(Vector3.Distance(s.Position, FlightModel.StartPosition(0)) < 2f, $"at {s.Position}");
+        Assert.Equal(1, rig.Module.Model.RespawnCount);
+        Assert.True(Vector3.Distance(s.Position, SpawnOf(0, 1).Position) < 2f, $"at {s.Position}, spawn {SpawnOf(0, 1).Position}");
         Assert.InRange(s.Speed, FlightModel.MaxSpeed - 0.5f, FlightModel.MaxSpeed);
         s = rig.Fly(Sticks(), 5f, p => Assert.True(p.Alive));
         Assert.True(MathF.Abs(Climb(s)) < 1f * Deg, "flies on level");
-        Assert.Equal(1, rig.Bus.CrashCount);
+        Assert.Equal(1, rig.Bus.CrashCountOf[0]);
 
         // Into the ground again: a second PlaneCrashed.
         for (int i = 0; i < 60 * 60 && rig.Bus.States[0].Alive; i++)
             rig.Step(Aim(-Vector3.UnitY, throttle: 1f));
-        Assert.Equal(2, rig.Bus.CrashCount);
-        Assert.Equal(rig.Bus.States[0].Position, rig.Bus.Crashes[1].Position);
-    }
-
-    /// <summary>
-    /// Climbs hands off at about <paramref name="degrees"/> until <paramref name="altitude"/> m. A climb
-    /// steeper than 15 degrees bleeds speed, so it climbs at 15 degrees until 60 m below, then pulls up.
-    /// </summary>
-    private static Rig ClimbTo(float degrees, float altitude, out PlaneState released)
-    {
-        var rig = new Rig();
-        if (degrees > 15f)
-        {
-            FlyUntil(rig, Sticks(pitch: 1f, throttle: 1f), s => Climb(s) > 15f * Deg);
-            for (int i = 0; i < 60 * 120 && rig.Bus.States[0].Position.Y < altitude - 60f; i++)
-                rig.Step(Sticks(throttle: 1f));
-        }
-        released = FlyUntil(rig, Sticks(pitch: 1f, throttle: 1f), s => Climb(s) > degrees * Deg);
-        for (int i = 0; i < 60 * 60 && rig.Bus.States[0].Position.Y < altitude; i++)
-            rig.Step(Sticks(throttle: 1f));
-        Assert.True(rig.Bus.States[0].Position.Y >= altitude, "climbed up");
-        return rig;
+        Assert.Equal(2, rig.Bus.CrashCountOf[0]);
+        Assert.Equal(rig.Bus.States[0].Position, rig.Bus.LastCrashOf[0].Position);
     }
 
     [Fact]
@@ -804,23 +950,25 @@ public class FlightModuleTests
         // Low down the engine is all there (under 1% lost at 200 m).
         Assert.True(FlightModel.LevelMaxSpeed(1f, 200f) > FlightModel.MaxSpeed * 0.997f);
         Assert.True(FlightModel.ClimbPower(1f, 200f) > FlightModel.MaxThrustAcceleration * 0.99f);
-        // Down to 200 m, then full throttle level: the old 60 m/s; a 10 degree climb keeps most of it, as before.
+        // Down to 200 m, then full throttle level: the old 60 m/s; a 10 degree climb keeps most of it, as before
+        // (round the orbit, clear of the border).
         var rig = new Rig();
-        for (int i = 0; i < 60 * 30 && rig.Step(Aim(Vector3.Normalize(new Vector3(0f, -0.35f, -1f)))).Position.Y > 230f; i++) { }
-        var s = rig.Fly(Aim(Level, throttle: 1f), 25f);
+        for (int i = 0; i < 60 * 30 && rig.Step(AimWorld(Orbit(rig.Module.Plane(0).State, -0.35f))).Position.Y > 230f; i++) { }
+        var s = FlyOrbit(rig, 1f, 25f);
         Assert.InRange(s.Position.Y, 150f, 250f);
         Assert.InRange(s.Speed, 59.5f, 60f);
-        s = rig.Fly(Aim(Vector3.Normalize(new Vector3(0f, MathF.Sin(10f * Deg), -MathF.Cos(10f * Deg))), throttle: 1f), 8f);
+        s = FlyOrbit(rig, 1f, 8f, rise: MathF.Tan(10f * Deg));
         Assert.True(s.Position.Y < 400f);
         Assert.InRange(s.Speed, 55f, 60f);
     }
 
-    /// <summary>Flies with the aim (full throttle) for <paramref name="seconds"/>; plane <paramref name="id"/> only.</summary>
-    private static PlaneState FlyPlane(Rig rig, int id, Vector3 aim, float seconds, Action<PlaneState>? check = null)
+    /// <summary>Flies plane <paramref name="id"/> only, full throttle, aimed nearly straight up (84 degrees) round the
+    /// <see cref="Orbit"/>, for <paramref name="seconds"/>.</summary>
+    private static PlaneState ClimbPlane(Rig rig, int id, float seconds, Action<PlaneState>? check = null)
     {
         for (int i = 0; i < (int)MathF.Round(seconds * 60f); i++)
         {
-            rig.Bus.Publish(new ControlInput(id, 0f, 0f, 0f, 1f, false, true, aim));
+            rig.Bus.Publish(new ControlInput(id, 0f, 0f, 0f, 1f, false, true, Orbit(rig.Module.Plane(id).State, 10f)));
             rig.Tick();
             check?.Invoke(rig.Bus.States[id]);
         }
@@ -832,11 +980,11 @@ public class FlightModuleTests
     [InlineData(5)] // a bot
     public void FullThrottleClimb_SlowsWithHeight_AndLevelsOffAround1000mByItself(int id)
     {
-        // Aimed straight up at full throttle for 5 minutes: the climb rate falls with height.
+        // Aimed (nearly) straight up at full throttle for 5 minutes: the climb rate falls with height.
         var rig = new Rig();
         float sum400 = 0f, sum700 = 0f, sum900 = 0f, highest = 0f;
         int n400 = 0, n700 = 0, n900 = 0, steps = 0, healthyTo800 = 0;
-        var end = FlyPlane(rig, id, Vector3.UnitY, 300f, p =>
+        var end = ClimbPlane(rig, id, 300f, p =>
         {
             float y = p.Position.Y;
             steps++;
@@ -860,21 +1008,17 @@ public class FlightModuleTests
         rig.Bus.Publish(Health(id, engine: 0f));
         int deadTo800 = 0;
         steps = 0;
-        end = FlyPlane(rig, id, Vector3.UnitY, 300f, p => { steps++; if (deadTo800 == 0 && p.Position.Y > 800f) deadTo800 = steps; });
+        end = ClimbPlane(rig, id, 300f, p => { steps++; if (deadTo800 == 0 && p.Position.Y > 800f) deadTo800 = steps; });
         Assert.True(deadTo800 > healthyTo800 * 1.2f, $"to 800 m: dead engine {deadTo800 / 60} s, healthy {healthyTo800 / 60} s");
         Assert.True(end.Position.Y < 985f, $"dead engine levels off at {end.Position.Y} m");
     }
 
-    /// <summary>Climbs at 15 degrees (full throttle) to 970 m, then flies a wide level circle at full throttle
-    /// for two minutes to gather the most speed that height allows (about 41 m/s).</summary>
-    private static Rig FastAt980m(out float t)
+    /// <summary>Climbs at 15 degrees (full throttle) round the orbit to 970 m, then flies on round it level at full
+    /// throttle for two minutes to gather the most speed that height allows (about 41 m/s).</summary>
+    private static Rig FastAt980m()
     {
-        var rig = new Rig();
-        var up = Aim(Vector3.Normalize(new Vector3(0f, MathF.Sin(15f * Deg), -MathF.Cos(15f * Deg))), throttle: 1f);
-        for (int i = 0; i < 60 * 120 && rig.Bus.States[0].Position.Y < 970f; i++)
-            rig.Step(up);
-        t = 0f;
-        var s = FlyLevelCircle(rig, 1f, 120f, ref t);
+        var rig = ClimbOrbit(970f);
+        var s = FlyOrbit(rig, 1f, 120f);
         Assert.InRange(s.Position.Y, 970f, 995f);
         Assert.True(s.Speed > 40f, $"{s.Speed} m/s");
         return rig;
@@ -887,16 +1031,16 @@ public class FlightModuleTests
         {
             // Fast near the top, then a steep full-throttle zoom (aimed 45 degrees up, still circling):
             // it trades its speed for height, past 1000 m.
-            var rig = FastAt980m(out float t);
+            var rig = FastAt980m();
             float highest = 0f;
-            FlyLevelCircle(rig, 1f, 6f, ref t, rise: 1f, p => highest = MathF.Max(highest, p.Position.Y));
+            FlyOrbit(rig, 1f, 6f, rise: 1f, check: p => highest = MathF.Max(highest, p.Position.Y));
             Assert.True(highest > FlightModel.PowerAltitude + 30f, $"zoomed to {highest} m");
 
             // Then, still aiming 45 degrees up, or hands off: too little power up there, so it sinks back, smoothly.
             float previous = rig.Bus.States[0].Position.Y;
             void Sinks(PlaneState p)
             {
-                if (p.Position.Y > FlightModel.PowerAltitude) // (hands off, back below, may meet the border guard)
+                if (p.Position.Y > FlightModel.PowerAltitude) // (above it: no bounce)
                     Assert.True(p.Position.Y <= previous + 0.01f, $"bounced: {previous} -> {p.Position.Y} m");
                 Assert.True(p.Speed >= FlightModel.MinSpeed);
                 previous = p.Position.Y;
@@ -904,13 +1048,17 @@ public class FlightModuleTests
             if (handsOff)
             {
                 // Hands off keeps its glide: back below 1000 m.
-                var end = rig.Fly(Sticks(throttle: 1f), 40f, Sinks);
+                // (Only until then: straight on, it would meet the border.)
+                for (int i = 0; i < 60 * 40 && rig.Bus.States[0].Position.Y >= FlightModel.PowerAltitude; i++)
+                    Sinks(rig.Step(Sticks(throttle: 1f)));
+                var end = rig.Bus.States[0];
+                Assert.True(end.Alive);
                 Assert.True(end.Position.Y < FlightModel.PowerAltitude, $"hands off at {end.Position.Y} m");
                 continue;
             }
-            var s = FlyLevelCircle(rig, 1f, 40f, ref t, rise: 1f, Sinks);
+            var s = FlyOrbit(rig, 1f, 40f, rise: 1f, check: Sinks);
             Assert.True(s.Position.Y < highest - 20f, $"at {s.Position.Y} m");
-            s = FlyLevelCircle(rig, 1f, 80f, ref t, rise: 1f, Sinks);
+            s = FlyOrbit(rig, 1f, 80f, rise: 1f, check: Sinks);
             Assert.InRange(s.Position.Y, FlightModel.PowerAltitude - 5f, FlightModel.PowerAltitude + 3f);
         }
     }
@@ -919,25 +1067,22 @@ public class FlightModuleTests
     public void LevelFlightAt1000m_HoldsAboutCruise_AnyClimbThereBleedsSpeed()
     {
         // Up to 1000 m with speed: a very gentle climb from the fast level circle.
-        var rig = FastAt980m(out float t);
+        var rig = FastAt980m();
         while (rig.Bus.States[0].Position.Y < FlightModel.PowerAltitude - 3f)
-        {
-            rig.Step(Aim(new Vector3(MathF.Sin(6f * Deg * t), 0.02f, -MathF.Cos(6f * Deg * t)), 1f));
-            t += (float)Dt;
-        }
+            rig.Step(AimWorld(Orbit(rig.Bus.States[0], 0.02f), 1f));
         // Level at full throttle: the speed holds, about cruise, and so does the height.
         float startY = rig.Bus.States[0].Position.Y, startSpeed = rig.Bus.States[0].Speed;
         Assert.InRange(startSpeed, 36f, 42f);
-        var s = FlyLevelCircle(rig, 1f, 30f, ref t);
+        var s = FlyOrbit(rig, 1f, 30f);
         Assert.InRange(s.Speed, 36f, 42f);
         Assert.InRange(s.Speed, startSpeed - 1f, startSpeed + 1f);
         Assert.InRange(s.Position.Y, startY - 3f, startY + 3f);
 
         // A climb there only bleeds speed, until the nose drops near the minimum: no climbing left.
         float previous = s.Speed, highest = 0f;
-        for (int i = 0; i < 60 * 25; i++, t += (float)Dt)
+        for (int i = 0; i < 60 * 25; i++)
         {
-            var p = rig.Step(Aim(Vector3.Normalize(new Vector3(MathF.Sin(6f * Deg * t), 0.15f, -MathF.Cos(6f * Deg * t))), 1f));
+            var p = rig.Step(AimWorld(Orbit(rig.Bus.States[0], 0.15f), 1f));
             Assert.True(p.Speed <= previous + 1e-3f, $"climbing at 1000 m gains no speed: {previous} -> {p.Speed}");
             previous = p.Speed;
             highest = MathF.Max(highest, p.Position.Y);
@@ -948,30 +1093,69 @@ public class FlightModuleTests
         Assert.True(highest < startY + 60f, $"only the speed's height: {highest} m");
     }
 
-    [Fact]
-    public void BorderHolds_TurnsBackAtTheEdge()
+    /// <summary>
+    /// Flies plane 0 with <paramref name="input"/> (at most <paramref name="seconds"/>) straight out across the edge
+    /// of the map: nothing turns it inside the map nor in the first <see cref="FlightModel.BorderOvershoot"/> past it
+    /// (its heading holds); then either the map's wall mountains stop it (a crash into the ground beyond the edge),
+    /// or, with no wall there, the border guard turns it back, well before the hard clamp.
+    /// </summary>
+    private static void FlyOutAcrossTheBorder(Rig rig, Func<ControlInput> input, float seconds)
     {
-        void Inside(PlaneState s)
+        Vector3 heading = rig.Module.Plane(0).Forward;
+        float farthest = 0f;
+        bool beyond = false, turnedBack = false;
+        for (int i = 0; i < (int)(seconds * 60f); i++)
         {
-            Assert.InRange(s.Position.X, -FlightModel.AreaHalfSize, FlightModel.AreaHalfSize);
-            Assert.InRange(s.Position.Z, -FlightModel.AreaHalfSize, FlightModel.AreaHalfSize);
+            var s = rig.Step(input());
+            if (!s.Alive)
+                break;
+            float distance = MathF.Max(MathF.Abs(s.Position.X), MathF.Abs(s.Position.Z)); // from the center line, the far way
+            Assert.True(distance <= FlightModel.ClampHalfSize, $"beyond the clamp at {s.Position}");
+            farthest = MathF.Max(farthest, distance);
+            if (distance > FlightModel.GuardHalfSize)
+                beyond = true;
+            if (!beyond)
+                Assert.True(AngleBetween(Forward(s), heading) < 3f * Deg, $"turned {distance - Half} m past the edge, at {s.Position}");
+            else if (Vector3.Dot(new Vector3(s.Velocity.X, 0f, s.Velocity.Z), new Vector3(s.Position.X, 0f, s.Position.Z)) < 0f)
+                turnedBack = true;
+        }
+        var end = rig.Bus.States[0];
+        if (!end.Alive)
+        {
+            // Walled: it flew on into the mountains beyond the edge and crashed there.
+            Assert.True(MathF.Max(MathF.Abs(end.Position.X), MathF.Abs(end.Position.Z)) > Half - 1f, $"crashed inside the map at {end.Position}");
+            Assert.Equal(1, rig.Bus.CrashCountOf[0]);
+            return;
+        }
+        Assert.True(beyond, $"never got {FlightModel.BorderOvershoot} m past the edge: {farthest}");
+        Assert.True(turnedBack, "the border guard turned it back");
+        Assert.True(farthest < FlightModel.ClampHalfSize - 1f, "turned back before the hard clamp");
+    }
+
+    [Fact]
+    public void Border_NoTurnBackInsideTheMap_TurnedBackOnlyBeyondIt_ClampLast()
+    {
+        // The turn-back starts 100 m beyond World's playable half-size; the hard clamp is further out.
+        Assert.Equal(FlightModel.GuardHalfSize, Half + 100f);
+        Assert.True(FlightModel.ClampHalfSize >= FlightModel.GuardHalfSize + 300f);
+        foreach (var outward in new[] { Vector3.UnitX, -Vector3.UnitX, Vector3.UnitZ, -Vector3.UnitZ })
+        {
+            // Turn (inside the area) to fly straight out, level, at full throttle, and keep aiming out.
+            var rig = new Rig();
+            for (int i = 0; i < 60 * 30 && AngleBetween(Forward(rig.Step(AimWorld(outward, 1f))), outward) > 0.5f * Deg; i++) { }
+            var turned = rig.Bus.States[0];
+            Assert.True(AngleBetween(Forward(turned), outward) <= 0.5f * Deg, "turned out");
+            Assert.True(MathF.Max(MathF.Abs(turned.Position.X), MathF.Abs(turned.Position.Z)) < 0.9f * Half, $"inside the area at {turned.Position}");
+            FlyOutAcrossTheBorder(rig, () => AimWorld(outward, 1f), 120f);
         }
 
-        // Hands off at full throttle for five minutes: it would leave the area in 40 s.
-        var rig = new Rig();
-        float farthest = 0f, north = 0f;
-        rig.Fly(Sticks(throttle: 1f), 300f, s =>
+        // Mouse aimed out of the area, diagonally, for five minutes: never beyond the clamp.
+        var diagonal = new Rig();
+        diagonal.Fly(AimWorld(Vector3.Normalize(new Vector3(1f, 0f, 1f)), throttle: 1f), 300f, s =>
         {
-            Inside(s);
-            farthest = MathF.Max(farthest, MathF.Max(MathF.Abs(s.Position.X), MathF.Abs(s.Position.Z)));
-            north = MathF.Min(north, s.Position.Z);
+            Assert.InRange(s.Position.X, -FlightModel.ClampHalfSize, FlightModel.ClampHalfSize);
+            Assert.InRange(s.Position.Z, -FlightModel.ClampHalfSize, FlightModel.ClampHalfSize);
         });
-        Assert.True(north < -1500f, "flew out to the far (north) edge");
-        Assert.True(farthest < FlightModel.AreaHalfSize - 1f, "turned back before the backstop");
-
-        // Mouse aimed out of the area, diagonally.
-        rig = new Rig();
-        rig.Fly(Aim(Vector3.Normalize(new Vector3(1f, 0f, 1f)), throttle: 1f), 300f, Inside);
     }
 
     [Fact]
@@ -1021,14 +1205,15 @@ public class FlightModuleTests
     [Fact]
     public void FourPlanesFlyFromTheirOwnInputs()
     {
-        var rig = new Rig();
-        var aim = Vector3.Normalize(new Vector3(1f, 0f, 0f));
+        var rig = new Rig(room: false);
+        // Plane 7 aims to its left (its spawn frame's -X).
+        var left7 = Vector3.Transform(-Vector3.UnitX, SpawnOf(7).Orientation);
         for (int i = 0; i < 30; i++) // 0.5 s
         {
             rig.Bus.Publish(new ControlInput(0, 1f, 0f, 0f, 0.5f, false, false, Vector3.Zero)); // pull up
             rig.Bus.Publish(new ControlInput(1, 0f, 1f, 0f, 0.5f, false, false, Vector3.Zero)); // roll right
             rig.Bus.Publish(new ControlInput(4, 0f, 0f, 1f, 0.5f, false, false, Vector3.Zero)); // yaw right
-            rig.Bus.Publish(new ControlInput(7, 0f, 0f, 0f, 0.5f, false, true, aim));           // aim east
+            rig.Bus.Publish(new ControlInput(7, 0f, 0f, 0f, 0.5f, false, true, left7));         // aim left
             rig.Tick();
         }
         var s = rig.Bus.States;
@@ -1037,17 +1222,17 @@ public class FlightModuleTests
         Assert.True(MathF.Abs(Bank(s[0])) < 1f * Deg);
         Assert.True(Bank(s[1]) > 60f * Deg, "plane 1 rolled right");
         Assert.True(MathF.Abs(Climb(s[1])) < 5f * Deg);
-        // Plane 4 heads south (+Z): yawing right turns its nose west (-X).
-        Assert.True(Forward(s[4]).X < -0.1f, "plane 4 yawed right");
+        // Yawing right turns plane 4's nose to the right of its spawn heading.
+        Assert.True(Vector3.Dot(Forward(s[4]), Vector3.Transform(Vector3.UnitX, SpawnOf(4).Orientation)) > 0.1f, "plane 4 yawed right");
         Assert.True(MathF.Abs(Bank(s[4])) < 1f * Deg);
-        // Plane 7 heads south and aims east (+X): a left turn, banked left.
-        Assert.True(Bank(s[7]) < -20f * Deg && Forward(s[7]).X > 0.05f, "plane 7 turns toward its aim");
+        // Plane 7 aims to its left: a left turn, banked left.
+        Assert.True(Bank(s[7]) < -20f * Deg && Vector3.Dot(Forward(s[7]), left7) > 0.05f, "plane 7 turns toward its aim");
 
-        // Planes with no input fly on hands off, level, at cruise.
+        // Planes with no input fly on hands off, level, on their spawn heading, from full speed toward cruise.
         foreach (int id in new[] { 2, 3, 5, 6 })
         {
-            Assert.True(AngleBetween(Forward(s[id]), id < 4 ? -Vector3.UnitZ : Vector3.UnitZ) < 0.01f);
-            Assert.InRange(s[id].Speed, 41f, 43f);
+            Assert.True(AngleBetween(Forward(s[id]), Vector3.Transform(-Vector3.UnitZ, SpawnOf(id).Orientation)) < 0.01f);
+            Assert.InRange(s[id].Speed, FlightModel.CruiseSpeed, FlightModel.MaxSpeed);
         }
 
         // Input for an unknown plane is ignored.
@@ -1065,11 +1250,13 @@ public class FlightModuleTests
         var rig = new Rig();
         rig.Bus.Publish(Health(1, engine: 0f));
         rig.Bus.Publish(Health(2, engine: 0.5f));
-        float[] previous = { 0f, FlightModel.CruiseSpeed, FlightModel.CruiseSpeed };
-        for (int i = 0; i < 60 * 20; i++)
+        float[] previous = { 0f, FlightModel.MaxSpeed, FlightModel.MaxSpeed };
+        // Full throttle round the orbit (clear of the border) for 40 s: from their full-speed start, drag slows the
+        // damaged ones gradually.
+        for (int i = 0; i < 60 * 40; i++)
         {
             for (int id = 0; id < 3; id++)
-                rig.Bus.Publish(new ControlInput(id, 0f, 0f, 0f, 1f, false, false, Vector3.Zero));
+                rig.Bus.Publish(new ControlInput(id, 0f, 0f, 0f, 1f, false, true, Orbit(rig.Module.Plane(id).State)));
             rig.Tick();
             // Above its max now: it only slows (drag), never speeds up.
             for (int id = 1; id < 3; id++)
@@ -1081,7 +1268,11 @@ public class FlightModuleTests
         Assert.InRange(rig.Bus.States[0].Speed, 57f, 60f);  // healthy: full speed
         Assert.InRange(rig.Bus.States[1].Speed, 35.5f, 36.5f); // dead engine: 60%
         Assert.InRange(rig.Bus.States[2].Speed, 47.5f, 48.5f); // half: 80%
-        rig.Run(20f);
+        for (int i = 0; i < 60 * 20; i++)
+        {
+            rig.Bus.Publish(new ControlInput(1, 0f, 0f, 0f, 1f, false, true, Orbit(rig.Module.Plane(1).State)));
+            rig.Tick();
+        }
         // At the start's 400 m height loses a little (2.6% of the 1000 m loss) on top of the damage.
         float deadMax = FlightModel.LevelMaxSpeed(0f, rig.Bus.States[1].Position.Y);
         Assert.InRange(deadMax, 35.5f, 36f);
@@ -1090,13 +1281,13 @@ public class FlightModuleTests
         // The same climb bleeds a dead engine's speed faster; the same dive builds less, still capped.
         rig = new Rig();
         rig.Bus.Publish(Health(1, engine: 0f));
-        FlyPair(rig, Level, 1f, 30f);
-        FlyPair(rig, SteepUp, 1f, 4f);
+        FlyPair(rig, p => Orbit(p), 1f, 30f);
+        FlyPair(rig, p => Pitched(p, 60f), 1f, 4f);
         Assert.True(rig.Bus.States[0].Speed - rig.Bus.States[1].Speed > 10f,
             $"healthy {rig.Bus.States[0].Speed}, dead engine {rig.Bus.States[1].Speed} m/s");
         Assert.True(rig.Bus.States[1].Speed >= FlightModel.MinSpeed);
-        FlyPair(rig, Level, 1f, 20f);
-        FlyPair(rig, Vector3.Normalize(new Vector3(0f, -1f, -0.3f)), 1f, 4f, (a, b) =>
+        FlyPair(rig, p => Orbit(p), 1f, 20f);
+        FlyPair(rig, p => Pitched(p, -73f), 1f, 4f, (a, b) =>
         {
             Assert.True(b.Speed <= a.Speed + 1e-3f, $"dead engine dives slower: {b.Speed} vs {a.Speed}");
             Assert.True(a.Speed <= FlightModel.DiveMaxSpeed);
@@ -1181,10 +1372,10 @@ public class FlightModuleTests
         // On the ground (World's terrain there): one PlaneCrashed, and it stays there, still down.
         var ground = rig.Bus.States[2];
         Assert.Equal(Neo.World.Terrain.HeightAt(ground.Position.X, ground.Position.Z), ground.Position.Y);
-        Assert.Equal(1, rig.Bus.CrashCount);
-        Assert.Equal(2, rig.Bus.Crashes[0].PlaneId);
-        Assert.Equal(ground.Position, rig.Bus.Crashes[0].Position);
-        Assert.True(rig.Bus.Crashes[0].Speed > FlightModel.MinSpeed, "hit at speed");
+        Assert.Equal(1, rig.Bus.CrashCountOf[2]);
+        Assert.Equal(2, rig.Bus.LastCrashOf[2].PlaneId);
+        Assert.Equal(ground.Position, rig.Bus.LastCrashOf[2].Position);
+        Assert.True(rig.Bus.LastCrashOf[2].Speed > FlightModel.MinSpeed, "hit at speed");
         rig.Run(3f, () =>
         {
             var s = rig.Bus.States[2];
@@ -1192,31 +1383,40 @@ public class FlightModuleTests
             Assert.Equal(ground.Position, s.Position);
             Assert.Equal(Vector3.Zero, s.Velocity);
         });
-        Assert.Equal(1, rig.Bus.CrashCount);
+        Assert.Equal(1, rig.Bus.CrashCountOf[2]);
     }
 
     [Theory]
     [InlineData(2)]
     [InlineData(5)]
-    public void Respawn_StartsAgainAtItsTeamsStartPointAtFullSpeed(int id)
+    public void Respawn_AtANewRandomSpawnOnItsTeamsHalf_AtFullSpeed(int id)
     {
         var rig = new Rig();
-        rig.Bus.Publish(Health(id, engine: 0.2f, right: 0.1f, tail: 0.1f));
-        rig.Run(2f);
-        rig.Bus.Publish(new PlaneDestroyed(id, 0));
-        rig.Run(5f);
-        Assert.False(rig.Bus.States[id].Alive);
+        Vector3 first = rig.Module.Plane(id).Position;
+        for (int count = 1; count <= 3; count++)
+        {
+            rig.Bus.Publish(Health(id, engine: 0.2f, right: 0.1f, tail: 0.1f));
+            rig.Run(2f);
+            rig.Bus.Publish(new PlaneDestroyed(id, 0));
+            rig.Run(5f);
+            Assert.False(rig.Bus.States[id].Alive);
 
-        rig.Bus.Publish(new PlaneRespawn(id));
-        rig.Tick();
-        var s = rig.Bus.States[id];
-        Vector3 start = FlightModel.StartPosition(id);
-        Assert.True(s.Alive);
-        Assert.True(Vector3.Distance(s.Position, start) < 2f, $"at {s.Position}, start {start}");
-        Assert.InRange(MathF.Abs(start.Z), 1490f, 1510f);
-        Assert.Equal(id < 4, start.Z > 0f);
-        Assert.True(AngleBetween(Forward(s), id < 4 ? -Vector3.UnitZ : Vector3.UnitZ) < 0.01f);
-        Assert.InRange(s.Speed, FlightModel.MaxSpeed - 0.5f, FlightModel.MaxSpeed);
+            rig.Bus.Publish(new PlaneRespawn(id));
+            Assert.Equal(count, rig.Module.Plane(id).RespawnCount);
+            var spawn = SpawnOf(id, count);
+            Assert.Equal(spawn.Position, rig.Module.Plane(id).Position);
+            Assert.Equal(spawn.Orientation, rig.Module.Plane(id).Orientation);
+            AssertSpawn(id, spawn.Position, spawn.Orientation);
+            Assert.True(Vector3.Distance(spawn.Position, first) > 1f, "a new place");
+            Assert.True(Vector3.Distance(spawn.Position, SpawnOf(id, count - 1).Position) > 1f, "not the last one");
+            rig.Tick();
+            var s = rig.Bus.States[id];
+            Assert.True(s.Alive);
+            Assert.True(Vector3.Distance(s.Position, spawn.Position) < 2f, $"at {s.Position}, spawn {spawn.Position}");
+            Assert.True(AngleBetween(Forward(s), Vector3.Transform(-Vector3.UnitZ, spawn.Orientation)) < 0.01f);
+            Assert.InRange(s.Speed, FlightModel.MaxSpeed - 0.5f, FlightModel.MaxSpeed);
+        }
+        var state = rig.Bus.States[id];
 
         // Undamaged again (Damage resets the parts too): it flies level hands off, at full max speed.
         for (int i = 0; i < 60 * 5; i++)
@@ -1224,9 +1424,9 @@ public class FlightModuleTests
             rig.Bus.Publish(new ControlInput(id, 0f, 0f, 0f, 1f, false, false, Vector3.Zero));
             rig.Tick();
         }
-        s = rig.Bus.States[id];
-        Assert.True(MathF.Abs(Bank(s)) < 0.5f * Deg);
-        Assert.InRange(s.Speed, 59f, 60f);
+        state = rig.Bus.States[id];
+        Assert.True(MathF.Abs(Bank(state)) < 0.5f * Deg);
+        Assert.InRange(state.Speed, 59f, 60f);
 
         // It can go down again.
         rig.Bus.Publish(new PlaneDestroyed(id, 0));
@@ -1292,29 +1492,24 @@ public class FlightModuleTests
     {
         var rig = new Rig();
         rig.Bus.Publish(Repair(0, true));
-        var s = rig.Fly(Sticks(pitch: 1f, throttle: 1f), 30f);
-        Assert.InRange(s.Speed, 57f, 60.5f);
-        Assert.Equal(1f, s.Throttle);
-        s = rig.Fly(Sticks(pitch: -1f, throttle: 0f), 30f);
+        // (It starts at full speed, so first idle, then full throttle; straight on, so not long: clear of the border.)
+        var s = rig.Fly(Sticks(pitch: -1f, throttle: 0f), 12f);
         Assert.InRange(s.Speed, 25f, 27f);
         Assert.Equal(0f, s.Throttle);
+        s = rig.Fly(Sticks(pitch: 1f, throttle: 1f), 12f);
+        Assert.InRange(s.Speed, 57f, 60.5f);
+        Assert.Equal(1f, s.Throttle);
         Assert.True(MathF.Abs(Climb(s)) < 1f * Deg, "level all along");
     }
 
     [Fact]
     public void Repairing_BorderGuardStillActs()
     {
-        // Repairing all the way to the north edge at full throttle: the border guard turns it back.
+        // Repairing (sticks ignored, heading kept) on across the map and out at full throttle: the border guard
+        // still turns it back beyond the edge (or the wall mountains stop it).
         var rig = new Rig();
         rig.Bus.Publish(Repair(0, true));
-        float north = 0f, farthest = 0f;
-        rig.Fly(Sticks(yaw: 1f, roll: 1f, throttle: 1f), 120f, s =>
-        {
-            north = MathF.Min(north, s.Position.Z);
-            farthest = MathF.Max(farthest, MathF.Max(MathF.Abs(s.Position.X), MathF.Abs(s.Position.Z)));
-        });
-        Assert.True(north < -1500f, "flew on north to the edge");
-        Assert.True(farthest < FlightModel.AreaHalfSize - 1f, "turned back before the backstop");
+        FlyOutAcrossTheBorder(rig, () => Sticks(yaw: 1f, roll: 1f, throttle: 1f), 150f);
     }
 
     // Collisions: the Collisions module's CollisionImpulse, applied by every plane.
@@ -1342,12 +1537,18 @@ public class FlightModuleTests
     public void Collision_TwoPlanesOnACollisionCourseSeparateAfterTheirImpulses_ThenFlyOn()
     {
         var rig = new Rig();
-        // Planes 0 and 4 start head-on along the same line (X = -90); move 4 a little aside, a glancing head-on.
-        rig.Bus.Publish(new CollisionImpulse(4, Vector3.Zero, Vector3.Zero, new Vector3(3f, 0f, 0f)));
-        Assert.Equal(-87f, rig.Module.Plane(4).Position.X, 3);
-        Assert.Equal(Vector3.Zero, rig.Module.Plane(4).Knock);
+        // Planes 0 and 4 fly on hands off, level, at the same speed: put plane 4 where it meets plane 0 at a point
+        // 0.15 x HalfSize ahead of it, 3 m aside across their closing course: a glancing collision.
+        FlightModel p0 = rig.Module.Plane(0), p4 = rig.Module.Plane(4);
+        Vector3 meet = p0.Position + p0.Forward * (0.15f * Half);
+        Vector3 across = Vector3.Normalize(Vector3.Cross(p0.Forward - p4.Forward, Vector3.UnitY));
+        Vector3 move = meet - p4.Forward * (0.15f * Half) + across * 3f - p4.Position;
+        Vector3 before = p4.Position;
+        rig.Bus.Publish(new CollisionImpulse(4, Vector3.Zero, Vector3.Zero, move));
+        Assert.True(Vector3.Distance(before + move, p4.Position) < 1e-3f, "moved by the separation at once");
+        Assert.Equal(Vector3.Zero, p4.Knock);
 
-        float Distance() => Vector3.Distance(rig.Module.Plane(0).Position, rig.Module.Plane(4).Position);
+        float Distance() => Vector3.Distance(p0.Position, p4.Position);
         int steps = 0;
         while (Distance() >= CollisionDistance)
         {
@@ -1355,45 +1556,49 @@ public class FlightModuleTests
             Assert.True(++steps < 60 * 60, "never met");
         }
 
-        Vector3 before0 = rig.Module.Plane(0).Velocity, before4 = rig.Module.Plane(4).Velocity;
+        Vector3 before0 = p0.Velocity, before4 = p4.Velocity;
+        Vector3 heading0 = p0.Forward, heading4 = p4.Forward;
         Bounce(rig, 0, 4, out Vector3 change);
         // Moved just clear at once, and the whole velocity change is applied (along the nose to the speed, the rest as knock).
         Assert.InRange(Distance(), CollisionDistance, CollisionDistance + 0.05f);
-        Assert.True(Vector3.Distance(before0 + change, rig.Module.Plane(0).Velocity) < 1e-3f);
-        Assert.True(Vector3.Distance(before4 - change, rig.Module.Plane(4).Velocity) < 1e-3f);
-        Vector3 n = Vector3.Normalize(rig.Module.Plane(0).Position - rig.Module.Plane(4).Position);
-        Assert.True(Vector3.Dot(rig.Module.Plane(0).Velocity - rig.Module.Plane(4).Velocity, n) > 5f, "now moving apart");
+        Assert.True(Vector3.Distance(before0 + change, p0.Velocity) < 1e-3f);
+        Assert.True(Vector3.Distance(before4 - change, p4.Velocity) < 1e-3f);
+        Vector3 n = Vector3.Normalize(p0.Position - p4.Position);
+        Assert.True(Vector3.Dot(p0.Velocity - p4.Velocity, n) > 5f, "now moving apart");
 
         // They pass each other without touching again, then fly on their way, back in normal flight.
+        Vector3 closing = before0 - before4;
         float closest = Distance(), sideways = 0f;
         rig.Run(4f, () =>
         {
             closest = MathF.Min(closest, Distance());
-            sideways = MathF.Max(sideways, MathF.Abs(rig.Module.Plane(0).Position.X - rig.Module.Plane(4).Position.X));
+            sideways = MathF.Max(sideways, MathF.Abs(Vector3.Dot(p0.Position - p4.Position, across)));
             for (int id = 0; id < 8; id++)
                 Assert.InRange(rig.Bus.States[id].Speed, FlightModel.MinSpeed, FlightModel.DiveMaxSpeed);
         });
         Assert.True(closest >= CollisionDistance, $"touched again: {closest} m");
         Assert.True(sideways > CollisionDistance + 2f, $"knocked apart sideways: {sideways} m");
         Assert.True(Distance() > 50f, "flew on past each other");
-        Assert.True(rig.Bus.States[0].Position.Z < rig.Bus.States[4].Position.Z, "passed");
-        Assert.Equal(Vector3.Zero, rig.Module.Plane(0).Knock);
-        Assert.Equal(Vector3.Zero, rig.Module.Plane(4).Knock);
-        Assert.True(AngleBetween(Forward(rig.Bus.States[0]), -Vector3.UnitZ) < 0.05f, "plane 0 still heads north");
-        Assert.True(AngleBetween(Forward(rig.Bus.States[4]), Vector3.UnitZ) < 0.05f, "plane 4 still heads south");
+        Assert.True(Vector3.Dot(p0.Position - p4.Position, closing) > 0f, "passed");
+        Assert.Equal(Vector3.Zero, p0.Knock);
+        Assert.Equal(Vector3.Zero, p4.Knock);
+        Assert.True(AngleBetween(p0.Forward, heading0) < 0.05f, "plane 0 still on its heading");
+        Assert.True(AngleBetween(p4.Forward, heading4) < 0.05f, "plane 4 still on its heading");
     }
 
     [Fact]
     public void Collision_DisplacesThePlane_ItsKnockDecaysToNormalFlightWithin2Seconds()
     {
         var rig = new Rig();
-        rig.Run(1f);
+        rig.Run(20f); // settled at cruise from its full-speed start
         var start = rig.Bus.States[0];
-        var shove = new Vector3(15f, 0f, 0f); // sideways, to the east
-        rig.Bus.Publish(new CollisionImpulse(0, shove, Vector3.Zero, new Vector3(1f, 0f, 0f)));
+        Vector3 right = Vector3.Transform(Vector3.UnitX, start.Orientation);
+        float Aside(Vector3 position) => Vector3.Dot(position - start.Position, right);
+        var shove = right * 15f; // sideways, to the right
+        rig.Bus.Publish(new CollisionImpulse(0, shove, Vector3.Zero, right));
 
         var plane = rig.Module.Plane(0);
-        Assert.Equal(start.Position.X + 1f, plane.Position.X, 3); // moved at once
+        Assert.Equal(1f, Aside(plane.Position), 2); // moved at once
         Assert.Equal(start.Speed, plane.Speed, 3);                // nothing along the nose
         Assert.True(Vector3.Distance(start.Velocity + shove, plane.Velocity) < 1e-3f);
 
@@ -1417,13 +1622,13 @@ public class FlightModuleTests
 
         // Shoved about 15 m/s x 0.3 s aside, then flies on as before: same heading, level, same speed, straight.
         var s = rig.Bus.States[0];
-        Assert.InRange(s.Position.X - start.Position.X, 1f + 4f, 1f + 5f);
+        Assert.InRange(Aside(s.Position), 1f + 4f, 1f + 5f);
         Assert.True(AngleBetween(Forward(s), Forward(start)) < 0.01f);
         Assert.InRange(s.Speed, start.Speed - 0.2f, start.Speed + 0.2f);
         Assert.True(Vector3.Distance(s.Velocity, Forward(s) * s.Speed) < 1e-4f, "back to flying along the nose");
-        float x = s.Position.X;
+        float x = Aside(s.Position);
         rig.Run(2f);
-        Assert.InRange(rig.Bus.States[0].Position.X, x - 0.5f, x + 0.5f);
+        Assert.InRange(Aside(rig.Bus.States[0].Position), x - 0.5f, x + 0.5f);
     }
 
     [Fact]
@@ -1450,12 +1655,12 @@ public class FlightModuleTests
 
         // Rammed hard from behind at full speed: capped at the dive maximum.
         rig = new Rig();
-        rig.Fly(Sticks(throttle: 1f), 10f);
+        FlyOrbit(rig, 1f, 10f);
         rig.Bus.Publish(new CollisionImpulse(0, Forward(rig.Bus.States[0]) * 60f, Vector3.Zero, Vector3.Zero));
         Assert.Equal(FlightModel.DiveMaxSpeed, rig.Module.Plane(0).Speed);
 
-        // Then speed stays in range and settles back at the throttle's.
-        var s = rig.Fly(Sticks(throttle: 1f), 30f, p => Assert.InRange(p.Speed, FlightModel.MinSpeed, FlightModel.DiveMaxSpeed));
+        // Then speed stays in range and settles back at the throttle's (round the orbit, clear of the border).
+        var s = FlyOrbit(rig, 1f, 30f, check: p => Assert.InRange(p.Speed, FlightModel.MinSpeed, FlightModel.DiveMaxSpeed));
         Assert.InRange(s.Speed, 57f, 60f);
     }
 
@@ -1522,19 +1727,21 @@ public class FlightModuleTests
         // Knocked down hard into the ground: no floor holds it, it crashes there once.
         var rig = new Rig();
         rig.Run(0.5f);
-        rig.Bus.Publish(new CollisionImpulse(0, new Vector3(0f, -60f, 0f), new Vector3(-3f, 0f, 0f), new Vector3(0f, -400f, 0f)));
+        var p0 = rig.Bus.States[0].Position;
+        float down = p0.Y - Neo.World.Terrain.HeightAt(p0.X, p0.Z); // to the ground under it
+        rig.Bus.Publish(new CollisionImpulse(0, new Vector3(0f, -60f, 0f), new Vector3(-3f, 0f, 0f), new Vector3(0f, -down, 0f)));
         rig.Tick();
         AssertCrashedOnTheGround(rig, 0, rig.Bus.States[0], 25f);
 
-        // Knocked out of the area: back at the edge at once, and stays inside.
+        // Knocked far out of the area: back at the hard clamp (beyond the turn-back) at once, and never beyond it.
         rig = new Rig();
         rig.Run(0.5f);
         rig.Bus.Publish(new CollisionImpulse(0, new Vector3(60f, 0f, 0f), Vector3.Zero, new Vector3(5000f, 0f, 0f)));
-        Assert.Equal(FlightModel.AreaHalfSize, rig.Module.Plane(0).Position.X);
+        Assert.Equal(FlightModel.ClampHalfSize, rig.Module.Plane(0).Position.X);
         rig.Run(10f, () =>
         {
             var p = rig.Bus.States[0].Position;
-            Assert.True(MathF.Abs(p.X) <= FlightModel.AreaHalfSize && MathF.Abs(p.Z) <= FlightModel.AreaHalfSize);
+            Assert.True(MathF.Abs(p.X) <= FlightModel.ClampHalfSize && MathF.Abs(p.Z) <= FlightModel.ClampHalfSize);
         });
     }
 
@@ -1579,6 +1786,6 @@ public class FlightModuleTests
             rig.Step(input);
         }
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-        Assert.Equal(1, rig.Bus.CrashCount);
+        Assert.Equal(1, rig.Bus.CrashCountOf[1]);
     }
 }

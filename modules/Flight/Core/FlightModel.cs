@@ -9,8 +9,8 @@ namespace Neo.Flight;
 /// Arcade flight of one plane: not a simulation. The plane always flies along its nose at
 /// a speed between <see cref="MinSpeed"/> and <see cref="DiveMaxSpeed"/> (no stall, no spin; the
 /// throttle sets the level speed, gravity along the flight path slows climbs and speeds up dives),
-/// turns at fixed body rates, and is kept inside the <see cref="AreaHalfSize"/> square by steering it
-/// gently away. Nothing keeps it off the ground: flying into World's terrain is a crash (<see cref="JustCrashed"/>). No hard ceiling: the engine loses
+/// turns at fixed body rates, and is turned back gently once it is <see cref="BorderOvershoot"/> beyond World's
+/// playable square (<see cref="WorldBounds.HalfSize"/>), so on a map walled by mountains the walls are the real border. Nothing keeps it off the ground: flying into World's terrain is a crash (<see cref="JustCrashed"/>). No hard ceiling: the engine loses
 /// power as the plane climbs, until at <see cref="PowerAltitude"/> full throttle only holds level
 /// flight, so climbs level off there by themselves. Damage slows it, drags it into a roll and weakens its tail; a downed plane falls
 /// to the ground; a crashed or downed plane rests there until it respawns. A collision (<see cref="ApplyImpulse"/>) shoves it aside and sets it spinning briefly, both
@@ -53,9 +53,15 @@ public sealed class FlightModel
     /// <summary>Time constant (s) with which a climb too steep for the speed is eased down (the nose drops gently).</summary>
     public const float LowSpeedResponse = 0.5f;
 
-    public const float AreaHalfSize = 2000f;
-    /// <summary>Distance from the border where the plane starts turning back.</summary>
+    /// <summary>How far (m) beyond World's playable half-size (<see cref="WorldBounds.HalfSize"/>) the gentle
+    /// border turn-back starts: inside the playable square nothing turns the plane.</summary>
+    public const float BorderOvershoot = 100f;
+    /// <summary>Half-size (m) of the square past which a plane heading out is turned back toward the center.</summary>
+    public const float GuardHalfSize = WorldBounds.HalfSize + BorderOvershoot;
+    /// <summary>Distance (m) beyond <see cref="GuardHalfSize"/> of the hard clamp, a last safety only.</summary>
     public const float BorderMargin = 400f;
+    /// <summary>Half-size (m) of the hard clamp on X and Z: the plane never gets beyond it.</summary>
+    public const float ClampHalfSize = GuardHalfSize + BorderMargin;
     /// <summary>Height (m) where full throttle only just holds level flight (at <see cref="PowerAltitudeSpeed"/>):
     /// the engine's power falls with height (see <see cref="AltitudePowerLoss"/>), its climbing power is gone here
     /// and above it there is not even enough for level flight, so the plane sinks back. Not a limit: nothing clamps.</summary>
@@ -75,11 +81,22 @@ public sealed class FlightModel
     public const float LevelMaxRoll = 0.5f;
     public const float LevelMaxPitch = 0.6f;
 
-    /// <summary>Start points: Allies this far south (+Z) of the center, Central this far north (-Z).</summary>
-    public const float StartDistance = 1500f;
-    public const float StartAltitude = 400f;
-    /// <summary>Planes of a team start side by side, this far apart along X.</summary>
-    public const float StartSpacing = 60f;
+    /// <summary>Spawns: Allies on the south half (+Z), Central on the north half (-Z), between these shares of
+    /// <see cref="WorldBounds.HalfSize"/> from the center line...</summary>
+    public const float SpawnNearShare = 0.3f;
+    public const float SpawnFarShare = 0.85f;
+    /// <summary>...and within this share of it either side of X = 0.</summary>
+    public const float SpawnSideShare = 0.85f;
+    /// <summary>Spawn height range (m), and the least height above the terrain there.</summary>
+    public const float SpawnMinAltitude = 350f;
+    public const float SpawnMaxAltitude = 450f;
+    public const float SpawnClearance = 150f;
+    /// <summary>A spawn heads toward the center, turned by up to this much either way.</summary>
+    public const float SpawnHeadingSpread = 30f * Deg;
+    /// <summary>Least distance (m) between planes of a team spawning together: each spawns in its own X lane.</summary>
+    public const float SpawnSpacing = 100f;
+    /// <summary>Points tried for a spawn low enough over the terrain before taking the last one, raised clear of it.</summary>
+    private const int SpawnTries = 16;
 
     /// <summary>Max speed with a dead engine, as a share of <see cref="MaxSpeed"/> (1 with a healthy engine).</summary>
     public const float DeadEngineMaxSpeed = 0.6f;
@@ -118,6 +135,7 @@ public sealed class FlightModel
     private bool _justCrashed;
     private float _crashSpeed;
     private bool _repairing;
+    private int _respawnCount;
     /// <summary>A collision's shove (world m/s), on top of the flight along the nose; fades with <see cref="KnockTimeConstant"/>.</summary>
     private Vector3 _knock;
     /// <summary>A collision's spin (body rad/s: x pitch, y yaw, z roll, right-handed, +Z back), on top of the controls; fades the same.</summary>
@@ -129,23 +147,57 @@ public sealed class FlightModel
     {
         PlaneId = planeId;
         _throttle = CruiseThrottle;
-        Place(CruiseSpeed);
+        Place();
     }
 
     /// <summary>
-    /// Where plane <paramref name="planeId"/> starts: Allies (0..3) <see cref="StartDistance"/> south
-    /// (+Z) of the center, Central (4..7) as far north, side by side <see cref="StartSpacing"/> apart.
+    /// Where plane <paramref name="planeId"/> spawns for the <paramref name="respawnCount"/>th time (0: the start of
+    /// the game): a random point on its team's half, Allies (0..3) at Z between <see cref="SpawnNearShare"/> and
+    /// <see cref="SpawnFarShare"/> x <see cref="WorldBounds.HalfSize"/>, Central (4..7) as far on -Z, X within
+    /// <see cref="SpawnSideShare"/> x HalfSize (each team slot in its own lane, so a team spawning together is at
+    /// least <see cref="SpawnSpacing"/> apart), at <see cref="SpawnMinAltitude"/>..<see cref="SpawnMaxAltitude"/> m and
+    /// at least <see cref="SpawnClearance"/> above the terrain there; level, heading toward the center within
+    /// <see cref="SpawnHeadingSpread"/>. Random from a generator seeded with the id and the count: same arguments,
+    /// same spawn.
     /// </summary>
-    public static Vector3 StartPosition(int planeId)
+    public static void SpawnPoint(int planeId, int respawnCount, out Vector3 position, out Quaternion orientation)
     {
+        uint state = (uint)planeId * 0x9E3779B9u ^ (uint)respawnCount * 0x85EBCA6Bu ^ 0x27D4EB2Fu;
+        Random01(ref state);
+        float half = WorldBounds.HalfSize;
         int slot = ((planeId % Teams.TeamSize) + Teams.TeamSize) % Teams.TeamSize;
-        float x = (slot - (Teams.TeamSize - 1) * 0.5f) * StartSpacing;
-        return new Vector3(x, StartAltitude, Teams.IsAllies(planeId) ? StartDistance : -StartDistance);
+        float lane = 2f * SpawnSideShare * half / Teams.TeamSize;
+        float laneMin = -SpawnSideShare * half + slot * lane + SpawnSpacing * 0.5f;
+        float laneSpan = MathF.Max(lane - SpawnSpacing, 0f);
+        float side = Teams.IsAllies(planeId) ? 1f : -1f;
+        float x = 0f, y = 0f, z = 0f;
+        for (int attempt = 0; attempt < SpawnTries; attempt++)
+        {
+            x = laneMin + laneSpan * Random01(ref state);
+            z = side * half * (SpawnNearShare + (SpawnFarShare - SpawnNearShare) * Random01(ref state));
+            y = MathF.Max(SpawnMinAltitude + (SpawnMaxAltitude - SpawnMinAltitude) * Random01(ref state),
+                Terrain.HeightAt(x, z) + SpawnClearance);
+            if (y <= SpawnMaxAltitude)
+                break; // else the ground is too high here: try another point (the last one is kept, raised clear)
+        }
+        position = new Vector3(x, y, z);
+        // Forward is (-sin(yaw), 0, -cos(yaw)): toward the center (-x, -z), turned by up to the spread.
+        float yaw = MathF.Atan2(x, z) + (Random01(ref state) * 2f - 1f) * SpawnHeadingSpread;
+        orientation = Quaternion.CreateFromAxisAngle(Vector3.UnitY, yaw);
     }
 
-    /// <summary>Start orientation: Allies head north (-Z), Central south (+Z), level.</summary>
-    public static Quaternion StartOrientation(int planeId) =>
-        Teams.IsAllies(planeId) ? Quaternion.Identity : Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI);
+    /// <summary>Next number in 0..1 from <paramref name="state"/> (a PCG hash step): a generator of its own,
+    /// no shared state.</summary>
+    private static float Random01(ref uint state)
+    {
+        state = state * 747796405u + 2891336453u;
+        uint word = ((state >> (int)((state >> 28) + 4u)) ^ state) * 277803737u;
+        word = (word >> 22) ^ word;
+        return (word >> 8) * (1f / 16777216f);
+    }
+
+    /// <summary>Respawns so far (0 until the first <see cref="Respawn"/>): with the id, it seeds the spawn point.</summary>
+    public int RespawnCount => _respawnCount;
 
     public bool Alive => _alive;
     /// <summary>Down and come to rest on the ground.</summary>
@@ -238,11 +290,12 @@ public sealed class FlightModel
     /// <summary>Backstop only: the border guard normally keeps the plane well inside these. No ceiling, no floor.</summary>
     private void ClampToArea()
     {
-        _position.X = Math.Clamp(_position.X, -AreaHalfSize, AreaHalfSize);
-        _position.Z = Math.Clamp(_position.Z, -AreaHalfSize, AreaHalfSize);
+        _position.X = Math.Clamp(_position.X, -ClampHalfSize, ClampHalfSize);
+        _position.Z = Math.Clamp(_position.Z, -ClampHalfSize, ClampHalfSize);
     }
 
-    /// <summary>Back in the fight: at its team's start point, level, at full speed, undamaged.</summary>
+    /// <summary>Back in the fight: at a new random spawn point on its team's half (<see cref="SpawnPoint"/>), level,
+    /// at full speed, undamaged.</summary>
     public void Respawn()
     {
         _alive = true;
@@ -255,14 +308,15 @@ public sealed class FlightModel
         _handsOffTime = 0f;
         _holdClimb = 0f;
         _knock = _kick = Vector3.Zero;
-        Place(MaxSpeed);
+        _respawnCount++;
+        Place();
     }
 
-    private void Place(float speed)
+    /// <summary>At this spawn's point and heading, at full speed.</summary>
+    private void Place()
     {
-        _position = StartPosition(PlaneId);
-        _orientation = StartOrientation(PlaneId);
-        _speed = speed;
+        SpawnPoint(PlaneId, _respawnCount, out _position, out _orientation);
+        _speed = MaxSpeed;
     }
 
     private static float Health(float value) => float.IsNaN(value) ? 1f : Math.Clamp(value, 0f, 1f);
@@ -403,8 +457,7 @@ public sealed class FlightModel
         _pitchCmd = _rollCmd = _yawCmd = 0f;
 
         _position += forward * (_speed * dt);
-        _position.X = Math.Clamp(_position.X, -AreaHalfSize, AreaHalfSize);
-        _position.Z = Math.Clamp(_position.Z, -AreaHalfSize, AreaHalfSize);
+        ClampToArea();
         HitGround();
     }
 
@@ -425,10 +478,10 @@ public sealed class FlightModel
         return true;
     }
 
-    /// <summary>A direction to steer to instead of the pilot when near the border and heading out.</summary>
+    /// <summary>A direction to steer to instead of the pilot when beyond <see cref="GuardHalfSize"/> and heading out.</summary>
     private bool GuardDirection(Vector3 forward, out Vector3 direction)
     {
-        float edge = AreaHalfSize - BorderMargin;
+        const float edge = GuardHalfSize;
         bool outX = (_position.X > edge && forward.X > 0f) || (_position.X < -edge && forward.X < 0f);
         bool outZ = (_position.Z > edge && forward.Z > 0f) || (_position.Z < -edge && forward.Z < 0f);
         if (!outX && !outZ)

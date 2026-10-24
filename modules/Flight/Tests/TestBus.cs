@@ -8,7 +8,7 @@ namespace Neo.Flight.Tests;
 /// <summary>
 /// Fake of the shell bus: delivers any published message (fake <c>ControlInput</c>, Damage
 /// messages) to its subscribers, keeps the last <see cref="PlaneState"/> of each plane, in
-/// publishing order, and records every <see cref="PlaneCrashed"/>. Like the shell's bus, a message reaches each handler once per subscription
+/// publishing order, and records every <see cref="PlaneCrashed"/> (also per plane). Like the shell's bus, a message reaches each handler once per subscription
 /// to its type. Does not allocate when publishing.
 /// </summary>
 internal sealed class TestBus : IMessageBus
@@ -24,6 +24,9 @@ internal sealed class TestBus : IMessageBus
     /// <summary>The <see cref="PlaneCrashed"/> messages published, in order (first 16), and how many in all.</summary>
     public readonly PlaneCrashed[] Crashes = new PlaneCrashed[16];
     public int CrashCount;
+    /// <summary>How many <see cref="PlaneCrashed"/> each plane id 0..7 published, and its latest one.</summary>
+    public readonly int[] CrashCountOf = new int[Teams.PlaneCount];
+    public readonly PlaneCrashed[] LastCrashOf = new PlaneCrashed[Teams.PlaneCount];
     private int _orderCount;
 
     public void ClearOrder() => _orderCount = 0;
@@ -46,9 +49,12 @@ internal sealed class TestBus : IMessageBus
         }
         else if (typeof(T) == typeof(PlaneCrashed))
         {
+            PlaneCrashed crash = Unsafe.As<T, PlaneCrashed>(ref Unsafe.AsRef(in message));
             if (CrashCount < Crashes.Length)
-                Crashes[CrashCount] = Unsafe.As<T, PlaneCrashed>(ref Unsafe.AsRef(in message));
+                Crashes[CrashCount] = crash;
             CrashCount++;
+            CrashCountOf[crash.PlaneId]++;
+            LastCrashOf[crash.PlaneId] = crash;
         }
         for (int i = 0; i < _handlers.Count; i++)
         {

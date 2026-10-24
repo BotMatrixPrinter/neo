@@ -37,10 +37,16 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
 
 ## The model (`FlightModel`)
 
-- **Start** (`StartPosition(id)`, `StartOrientation(id)`): in the air at 400 m, level, at
-  cruise. Allies 1500 m south of the center (Z = +1500) heading north (-Z), Central 1500 m
-  north (Z = -1500) heading south (+Z); each team side by side 60 m apart along X, centered
-  on X = 0 (X = -90, -30, 30, 90 for the 1st..4th of the team).
+- **Spawn** (`SpawnPoint(id, respawnCount, out position, out orientation)`; the start of the game is
+  count 0, each `PlaneRespawn` the next, `RespawnCount`): a random point on the plane's own half of
+  World's map, sized from `Neo.World.WorldBounds.HalfSize` (H) at run time, never a copy of it: Allies
+  (0-3) at Z between +0.3 H and +0.85 H (south), Central (4-7) between -0.3 H and -0.85 H (north); X within
+  +-0.85 H, each team slot in its own quarter of that width, kept 50 m in from its sides, so planes of a team
+  spawning together are at least 100 m apart (`SpawnSpacing`). Height 350..450 m and at least 150 m above
+  `Terrain.HeightAt` there (where the ground is too high it tries another point, up to 16, then takes the
+  last one raised 150 m above the ground). Level, heading toward the center turned by up to +-30 degrees,
+  at full speed (60 m/s). Random from its own seeded generator (a hash of the plane id and the respawn
+  count), never `System.Random`: the same id and count give the same spawn, each respawn a new one.
 - **Speed**: throttle sets the level speed: 0 → 25 m/s (`MinSpeed`), 0.5 → 42 m/s (cruise,
   about 150 km/h), 1 → 60 m/s (`MaxSpeed`, the level maximum). Each step the speed changes by
   the throttle's pull and drag (toward the throttle's speed at 0.5/s, `SpeedResponse`, adding
@@ -99,10 +105,12 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
   then on (as a downed plane), and the module publishes one `PlaneCrashed`. It stays there until
   its `PlaneRespawn`. Flying low just above the ground is fine. A falling downed plane ends the
   same way (see "Damage").
-- **Border**: a 4 km x 4 km area centered on the origin (|x|, |z| <= 2000 m). Within 400 m
-  of an edge and heading out, the autopilot turns back toward the origin, keeping a mild
-  climb or dive. A hard clamp at the edge is only a backstop. The guard wins over the pilot's
-  sticks and aim.
+- **Border**: World's map is the square |x|, |z| <= `WorldBounds.HalfSize` (read at run time). Nothing
+  turns a plane back inside it: a map walled by mountains stops planes there (a ground crash). Only
+  100 m (`BorderOvershoot`) beyond its edge (`GuardHalfSize`), heading out, the autopilot turns back
+  toward the origin, keeping a mild climb or dive; so on a map with no walls planes still come back. A
+  hard clamp 400 m further out (`ClampHalfSize`, HalfSize + 500 m) is only a last safety. The guard wins
+  over the pilot's sticks and aim.
 
 ## Damage
 
@@ -127,7 +135,7 @@ Each plane keeps the latest part health from `PlaneDamageState` (0..1, 1 undamag
   hands off at once (no 0.25 s wait): wings level, the climb or dive it had kept, its heading
   kept; throttle still applies, and the border guard still acts. When `Repairing`
   turns false the pilot's input applies again at once. Respawn clears it.
-- **`PlaneRespawn`** (also after a crash): back at its team's start point and heading, level,
+- **`PlaneRespawn`** (also after a crash): at a new random spawn on its team's half (see "Spawn"), level,
   at full speed (60 m/s), `Alive` true, parts back at full health.
 
 ## Collisions
@@ -135,7 +143,7 @@ Each plane keeps the latest part health from `PlaneDamageState` (0..1, 1 undamag
 On a `CollisionImpulse` for a flying plane (`FlightModel.ApplyImpulse`; downed planes, ids
 outside 0..7 and non-finite values are ignored), at once:
 
-- **Separation**: the plane moves by it (still inside the border backstop; knocked into the
+- **Separation**: the plane moves by it (still inside the hard clamp; knocked into the
   ground, it crashes in the next step).
 - **VelocityChange**: its part along the nose changes the speed (kept within 25..85 m/s); the
   rest (sideways, and whatever the speed limits cut off) becomes a **knock** velocity
@@ -149,13 +157,21 @@ outside 0..7 and non-finite values are ignored), at once:
   the pilot's sticks, aim or the hands-off levelling act on top and bring it back (hands off,
   wings level again within about 3 s; a pitch kick's climb is taken back to the one held).
 
-The border clamp still holds.
+The hard clamp still holds.
 Destroy and respawn clear knock and spin. Deterministic, no allocation.
 
 ## Tests
 
 `Tests/FlightModuleTests.cs`, with a fake bus (`TestBus`) that publishes fake
-`ControlInput`s: start state, speeds stay in 25..85 (cruise, max, min, dives, climbs,
+`ControlInput`s. Size-agnostic: every map distance is a share of `WorldBounds.HalfSize` and every
+ground height comes from `Terrain.HeightAt`, read at run time (a hill to fly into is found by sampling
+it), so the tests pass on any map size, with or without wall mountains. Aims are given in plane 0's
+spawn frame; the rig moves plane 0 back along its line to the center for room, and long flights circle
+the center (`Orbit`, 0.4 x HalfSize) instead of flying straight into the border. Spawns (every plane,
+200 respawns each: on its own half, inside the area, 350..450 m and 150 m clear of the terrain, level,
+heading toward the center within 30 degrees, different each respawn, spread over depth, width, height
+and heading, a team's planes at least 100 m apart, deterministic and untouched by `System.Random`; the
+module starts every plane there at full speed), speeds stay in 25..85 (cruise, max, min, dives, climbs,
 random flying, respawning after any crash), height (the power curve is full at the ground, smooth, 0 climb power and
 about 40 m/s level at 1000 m, a loss above, no ceiling constant left; low altitude unchanged;
 full-throttle climbs, player and bot, slow with height and level off around 1000 m, a dead
@@ -174,21 +190,23 @@ shorter way, a steep dive is kept all the way into the ground: no pull-up), the 
 point reaches the terrain, resting at its height, with exactly one `PlaneCrashed`; a dive aimed
 at a mountain crashes on the slope at its height; flying at 9 m over the plain, hands off, keeps
 its height with no pull-up and no crash; respawn after a crash flies again and can crash again),
-the border holds, determinism (with damage, downing and respawn), no allocations per
-tick; eight planes start by team and are published every tick in id order, four planes fly
+the border (aimed straight out each way, no turn-back inside the map nor within 100 m past its edge;
+then either the wall mountains stop it with a crash beyond the edge, or the guard turns it back
+before the hard clamp; a diagonal aim never gets past the clamp), determinism (with damage, downing and respawn), no allocations per
+tick; all eight planes are published every tick in id order, four planes fly
 from their own inputs (others hands off), the `Teams` helper, `PlaneState.Alive` with the
 old constructor, engine damage (lower level speed, slows down gradually to it, climbs and
 dives slower), wing and tail damage, falling to the ground (one `PlaneCrashed`, at the terrain height) and
-staying there on `PlaneDestroyed`, respawn at the team's start point at full speed, repairing (sticks and aim
+staying there on `PlaneDestroyed`, respawn (three times) each at its own new spawn at full speed, repairing (sticks and aim
 ignored, wings level and heading and climb kept, sticks back at once after; other and unknown ids;
-throttle still works; the border guard still acts), collisions (two planes on a
-head-on course, given a fake of Collisions' bounce, move just clear, get the whole velocity
+throttle still works; the border guard still acts beyond the edge), collisions (two planes on a
+crossing course, given a fake of Collisions' bounce, move just clear, get the whole velocity
 change, pass each other without touching again and fly on; a sideways shove moves the plane at
 once and its knock fades smoothly, gone within 2 s, then it flies on straight; speed along the
 nose changes within 25..85 and settles back; a roll kick either way rolls it and hands off
 recovers without overshoot; sticks act on top of a kick; a pitch kick is taken back; knocked into the
-ground it crashes once; the border holds; downed planes, unknown ids and NaN ignored; deterministic and allocation-free with
+ground it crashes once; knocked far out it stops at the hard clamp; downed planes, unknown ids and NaN ignored; deterministic and allocation-free with
 impulses). The fake bus delivers each message once per subscription to its type, like the shell's, and
-records the `PlaneCrashed` messages.
+records the `PlaneCrashed` messages (also per plane: on a walled map, planes left hands off crash into the walls).
 
 Test it alone: `./test.sh Flight`. No Godot view: the Plane module draws the plane.
