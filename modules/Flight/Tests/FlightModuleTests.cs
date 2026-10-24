@@ -1093,6 +1093,98 @@ public class FlightModuleTests
         Assert.False(rig.Bus.States[id].Alive);
     }
 
+    private static RepairState Repair(int id, bool repairing) =>
+        new(id, repairing, PlanePart.Engine, 0f, repairing ? 1 : 0);
+
+    [Fact]
+    public void Repairing_IgnoresSticksAndAim_FliesOnHandsOffKeepingItsHeading_SticksBackAtOnceAfter()
+    {
+        // Level flight, then repairing: full stick (and mouse aim) in every direction changes nothing.
+        var rig = new Rig();
+        rig.Bus.Publish(Repair(0, true));
+        Assert.True(rig.Module.Model.Repairing);
+        float heading = Heading(rig.Fly(Sticks(), 0.1f)), climb = Climb(rig.Bus.States[0]);
+        foreach (var input in new[] { Sticks(pitch: 1f, roll: 1f, yaw: 1f), Sticks(pitch: -1f, roll: -1f, yaw: -1f),
+                     Aim(Vector3.Normalize(new Vector3(1f, 0.5f, 0f))) })
+        {
+            rig.Fly(input, 3f, s =>
+            {
+                Assert.True(MathF.Abs(Heading(s) - heading) < 0.5f * Deg, $"heading {Heading(s) / Deg} deg");
+                Assert.True(MathF.Abs(Climb(s) - climb) < 0.5f * Deg, $"climb {Climb(s) / Deg} deg");
+                Assert.True(MathF.Abs(Bank(s)) < 0.5f * Deg, $"bank {Bank(s) / Deg} deg");
+            });
+        }
+
+        // Repairing ends: the sticks act again at once.
+        rig.Bus.Publish(Repair(0, false));
+        Assert.False(rig.Module.Model.Repairing);
+        var s = rig.Fly(Sticks(roll: 1f), 0.3f);
+        Assert.True(Bank(s) > 30f * Deg, $"bank {Bank(s) / Deg} deg");
+
+        // Banked in a climb when the repair starts, stick still held: wings level at once like hands off
+        // (no 0.25 s wait), the climb is kept, the stick does nothing.
+        rig = new Rig();
+        FlyUntil(rig, Sticks(pitch: 1f), p => Climb(p) > 17f * Deg);
+        rig.Fly(Sticks(), 2f);
+        var released = FlyUntil(rig, Sticks(roll: 1f), p => Bank(p) > 45f * Deg);
+        float held = Climb(released);
+        rig.Bus.Publish(Repair(0, true));
+        s = rig.Fly(Sticks(roll: 1f, pitch: -1f), 0.25f);
+        Assert.True(Bank(s) < Bank(released), "levelling started at once");
+        s = rig.Fly(Sticks(roll: 1f, pitch: -1f), 5f, p => Assert.True(MathF.Abs(Climb(p) - held) < 1.5f * Deg));
+        Assert.True(MathF.Abs(Bank(s)) < 0.5f * Deg, "wings level");
+        heading = Heading(s);
+        s = rig.Fly(Sticks(roll: -1f, yaw: 1f), 3f);
+        Assert.True(MathF.Abs(Heading(s) - heading) < 0.5f * Deg, "heading kept");
+
+        // Another plane repairing does not touch plane 0; unknown ids are ignored.
+        rig = new Rig();
+        rig.Bus.Publish(Repair(1, true));
+        rig.Bus.Publish(Repair(8, true));
+        rig.Bus.Publish(Repair(-1, true));
+        Assert.True(Climb(rig.Fly(Sticks(pitch: 1f), 0.5f)) > 15f * Deg);
+        Assert.True(rig.Module.Plane(1).Repairing);
+    }
+
+    [Fact]
+    public void Repairing_ThrottleStillWorks()
+    {
+        var rig = new Rig();
+        rig.Bus.Publish(Repair(0, true));
+        var s = rig.Fly(Sticks(pitch: 1f, throttle: 1f), 30f);
+        Assert.InRange(s.Speed, 57f, 60.5f);
+        Assert.Equal(1f, s.Throttle);
+        s = rig.Fly(Sticks(pitch: -1f, throttle: 0f), 30f);
+        Assert.InRange(s.Speed, 25f, 27f);
+        Assert.Equal(0f, s.Throttle);
+        Assert.True(MathF.Abs(Climb(s)) < 1f * Deg, "level all along");
+    }
+
+    [Fact]
+    public void Repairing_FloorAndBorderGuardsStillAct()
+    {
+        // A steep dive when the repair starts: the dive is kept until the floor guard pulls up.
+        var rig = new Rig();
+        FlyUntil(rig, Sticks(pitch: -1f, throttle: 1f), s => Climb(s) < -60f * Deg);
+        rig.Bus.Publish(Repair(0, true));
+        float lowest = float.MaxValue;
+        var end = rig.Fly(Sticks(pitch: -1f, throttle: 1f), 10f, s => lowest = MathF.Min(lowest, s.Position.Y));
+        Assert.True(lowest > FlightModel.FloorAltitude + 1f, $"at {lowest} m");
+        Assert.True(Climb(end) > -1f * Deg, "not diving back");
+
+        // Repairing all the way to the north edge at full throttle: the border guard turns it back.
+        rig = new Rig();
+        rig.Bus.Publish(Repair(0, true));
+        float north = 0f, farthest = 0f;
+        rig.Fly(Sticks(yaw: 1f, roll: 1f, throttle: 1f), 120f, s =>
+        {
+            north = MathF.Min(north, s.Position.Z);
+            farthest = MathF.Max(farthest, MathF.Max(MathF.Abs(s.Position.X), MathF.Abs(s.Position.Z)));
+        });
+        Assert.True(north < -1500f, "flew on north to the edge");
+        Assert.True(farthest < FlightModel.AreaHalfSize - 1f, "turned back before the backstop");
+    }
+
     [Fact]
     public void TickDoesNotAllocate()
     {

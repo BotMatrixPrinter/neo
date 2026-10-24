@@ -20,8 +20,8 @@ Flies the planes: an arcade model, not a simulation. Eight planes, `PlaneId` 0..
 - **Input**: subscribes to `Neo.Input.ControlInput` (modules/Input/Contract); each plane uses
   the latest one with its `PlaneId`; ids outside 0..7 are ignored. Before any arrives for a
   plane: hands off (it flies on level, as it started), throttle 0.5.
-- **Damage**: subscribes to `Neo.Damage.PlaneDamageState`, `PlaneDestroyed` and
-  `PlaneRespawn` (modules/Damage/Contract); see "Damage" below.
+- **Damage**: subscribes to `Neo.Damage.PlaneDamageState`, `PlaneDestroyed`, `PlaneRespawn`
+  and `RepairState` (modules/Damage/Contract); see "Damage" below.
 - **Core** (`Core/`): `FlightModule` (the `IModule`) keeps one `FlightModel` per plane
   (`Plane(id)`, `Model` is plane 0), steps them all each tick and publishes their states.
   No allocations per tick; deterministic (same inputs, same result).
@@ -109,6 +109,11 @@ Each plane keeps the latest part health from `PlaneDamageState` (0..1, 1 undamag
   degrees down (40 deg/s), it spins slowly about its nose (90 deg/s) and turns a little,
   gaining speed in the dive, until it reaches the ground (Y = 0, World's `GroundY`); then
   it stays there, speed and velocity 0. `Alive` is false all that time.
+- **`RepairState`** (in-flight repair): while a plane's latest `Repairing` is true
+  (`FlightModel.Repairing`), its pilot's `Pitch`, `Roll`, `Yaw` and aim are ignored: it flies on
+  hands off at once (no 0.25 s wait): wings level, the climb or dive it had kept, its heading
+  kept; throttle still applies, and the floor and border guards still act. When `Repairing`
+  turns false the pilot's input applies again at once. Respawn clears it.
 - **`PlaneRespawn`**: back at its team's start point and heading, level, at full speed
   (60 m/s), `Alive` true, parts back at full health.
 
@@ -135,6 +140,8 @@ tick; eight planes start by team and are published every tick in id order, four 
 from their own inputs (others hands off), the `Teams` helper, `PlaneState.Alive` with the
 old constructor, engine damage (lower level speed, slows down gradually to it, climbs and
 dives slower), wing and tail damage, falling to the ground and staying there on
-`PlaneDestroyed`, respawn at the team's start point at full speed.
+`PlaneDestroyed`, respawn at the team's start point at full speed, repairing (sticks and aim
+ignored, wings level and heading and climb kept, sticks back at once after; other and unknown ids;
+throttle still works; floor and border guards still act).
 
 Test it alone: `./test.sh Flight`. No Godot view: the Plane module draws the plane.

@@ -111,6 +111,7 @@ public sealed class FlightModel
     private float _engine = 1f, _leftWing = 1f, _rightWing = 1f, _tail = 1f;
     private bool _alive = true;
     private bool _grounded;
+    private bool _repairing;
 
     public int PlaneId { get; }
 
@@ -179,6 +180,12 @@ public sealed class FlightModel
         _tail = Health(tail);
     }
 
+    /// <summary>True while the pilot repairs in flight: their pitch, roll, yaw and aim are ignored (hands off).</summary>
+    public bool Repairing => _repairing;
+
+    /// <summary>In-flight repair on or off (Damage's <c>RepairState.Repairing</c>).</summary>
+    public void SetRepairing(bool repairing) => _repairing = repairing;
+
     /// <summary>The plane is shot down: it falls (nose down, slow spin) to the ground and stays there.</summary>
     public void Destroy() => _alive = false;
 
@@ -187,6 +194,7 @@ public sealed class FlightModel
     {
         _alive = true;
         _grounded = false;
+        _repairing = false;
         _engine = _leftWing = _rightWing = _tail = 1f;
         _pitchCmd = _rollCmd = _yawCmd = 0f;
         _handsOffTime = 0f;
@@ -232,7 +240,8 @@ public sealed class FlightModel
 
         Vector3 forward = Vector3.Transform(-Vector3.UnitZ, _orientation);
 
-        bool handsOff = !input.HasAim && MathF.Abs(input.Pitch) < HandsOffDeadZone
+        // Repairing: the pilot's steering is ignored, the plane flies on hands off at once (throttle still works).
+        bool handsOff = _repairing || !input.HasAim && MathF.Abs(input.Pitch) < HandsOffDeadZone
             && MathF.Abs(input.Roll) < HandsOffDeadZone && MathF.Abs(input.Yaw) < HandsOffDeadZone;
         float climb = MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
         if (handsOff && _handsOffTime == 0f)
@@ -247,9 +256,9 @@ public sealed class FlightModel
             // Once clear, hands off keeps what the guard left (never a dive after a floor pull-up).
             _holdClimb = low ? MathF.Max(climb, 0f) : climb;
         }
-        else if (input.HasAim)
+        else if (input.HasAim && !_repairing)
             Steer(input.AimDirection, out pitch, out roll, out yaw);
-        else if (_handsOffTime >= HandsOffDelay)
+        else if (_repairing || _handsOffTime >= HandsOffDelay)
             Level(climb, out pitch, out roll, out yaw);
         else
         {

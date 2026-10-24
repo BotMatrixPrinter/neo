@@ -8,11 +8,11 @@ namespace Neo.Flight;
 /// <summary>
 /// The Flight module: flies planes 0..<see cref="Teams.PlaneCount"/>-1, each with the latest
 /// <see cref="ControlInput"/> for it, applies the Damage module's part health, downings and
-/// respawns, and publishes every plane's <see cref="PlaneState"/> after every fixed step, in id
+/// respawns and in-flight repairs (steering ignored while repairing), and publishes every plane's <see cref="PlaneState"/> after every fixed step, in id
 /// order. Allocation-free per tick.
 /// </summary>
 public sealed class FlightModule : IModule, IMessageHandler<ControlInput>, IMessageHandler<PlaneDamageState>,
-    IMessageHandler<PlaneDestroyed>, IMessageHandler<PlaneRespawn>
+    IMessageHandler<PlaneDestroyed>, IMessageHandler<PlaneRespawn>, IMessageHandler<RepairState>
 {
     private readonly FlightModel[] _models = new FlightModel[Teams.PlaneCount];
     private readonly ControlInput[] _inputs = new ControlInput[Teams.PlaneCount];
@@ -41,6 +41,7 @@ public sealed class FlightModule : IModule, IMessageHandler<ControlInput>, IMess
         bus.Subscribe<PlaneDamageState>(this);
         bus.Subscribe<PlaneDestroyed>(this);
         bus.Subscribe<PlaneRespawn>(this);
+        bus.Subscribe<RepairState>(this);
     }
 
     public void Handle(in ControlInput message)
@@ -65,6 +66,12 @@ public sealed class FlightModule : IModule, IMessageHandler<ControlInput>, IMess
     {
         if (IsPlane(message.PlaneId))
             _models[message.PlaneId].Respawn();
+    }
+
+    public void Handle(in RepairState message)
+    {
+        if (IsPlane(message.PlaneId))
+            _models[message.PlaneId].SetRepairing(message.Repairing);
     }
 
     public void Tick(in TickContext tick)
