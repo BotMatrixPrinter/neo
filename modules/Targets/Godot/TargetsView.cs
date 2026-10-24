@@ -29,6 +29,7 @@ public partial class TargetsView : Node3D, IModuleView
 
     private readonly Node3D[] _balloons = new Node3D[TargetsModule.Count];
     private readonly Node3D[] _shapes = new Node3D[TargetsModule.Count];
+    private readonly MeshInstance3D[] _cables = new MeshInstance3D[TargetsModule.Count];
     private readonly Node3D[] _pops = new Node3D[TargetsModule.Count];
     private readonly MeshInstance3D[,] _puffs = new MeshInstance3D[TargetsModule.Count, Puffs];
     private readonly MeshInstance3D[,] _shreds = new MeshInstance3D[TargetsModule.Count, Shreds];
@@ -68,6 +69,7 @@ public partial class TargetsView : Node3D, IModuleView
         var sideFin = new BoxMesh { Size = new Vector3(4.2f, 0.35f, 4f) };
         var basket = new BoxMesh { Size = new Vector3(1.6f, 1.3f, 1.6f) };
         var rigging = new CylinderMesh { TopRadius = 0.06f, BottomRadius = 0.06f, Height = 4.2f, RadialSegments = 6 };
+        var cable = new CylinderMesh { TopRadius = 0.15f, BottomRadius = 0.15f, Height = 1f, RadialSegments = 6 };
         var puff = new SphereMesh { Radius = 1f, Height = 2f, RadialSegments = 12, Rings = 6 };
         var shred = new BoxMesh { Size = new Vector3(2.2f, 0.15f, 1.4f) };
 
@@ -96,10 +98,8 @@ public partial class TargetsView : Node3D, IModuleView
             Add(shape, rigging, rope, null, new Vector3(0, -5.8f, 0), Vector3.Zero);
             Add(shape, basket, wicker, outline, new Vector3(0, -8.5f, 0), Vector3.Zero);
 
-            // The tether, from under the body down to the ground (y = 0).
-            float height = Mathf.Max(1f, state.Position.Y - 4.5f);
-            var cable = new CylinderMesh { TopRadius = 0.15f, BottomRadius = 0.15f, Height = height, RadialSegments = 6 };
-            Add(shape, cable, rope, null, new Vector3(0, -4.5f - height / 2, -2f), Vector3.Zero);
+            // The tether, from under the body down to its anchor on the terrain (placed in UpdateCable).
+            _cables[i] = Add(shape, cable, rope, null, Vector3.Zero, Vector3.Zero);
 
             var pop = new Node3D { Name = "Pop", Visible = false };
             balloon.AddChild(pop);
@@ -113,6 +113,7 @@ public partial class TargetsView : Node3D, IModuleView
             _shapes[i] = shape;
             _pops[i] = pop;
             shape.Visible = _views.ShapeVisible(i);
+            UpdateCable(i);
         }
 
         if (_previewBus != null)
@@ -141,10 +142,24 @@ public partial class TargetsView : Node3D, IModuleView
         {
             _balloons[i].Position = ToGodot(_views.Position(i));
             _shapes[i].Visible = _views.ShapeVisible(i);
+            UpdateCable(i);
             _pops[i].Visible = _views.PopPlaying(i);
             if (_views.PopPlaying(i))
                 AnimatePop(i, _views.PopAge(i));
         }
+    }
+
+    // A unit-height cylinder stretched from the cable's top (under the balloon) to its anchor.
+    private void UpdateCable(int i)
+    {
+        var top = ToGodot(_views!.CableTop(i));
+        var bottom = ToGodot(_views.CableBottom(i));
+        var span = top - bottom;
+        float length = Mathf.Max(0.01f, span.Length());
+        var cable = _cables[i];
+        cable.Position = (top + bottom) * 0.5f - _balloons[i].Position;
+        cable.Quaternion = new Quaternion(Vector3.Up, span / length);
+        cable.Scale = new Vector3(1f, length, 1f);
     }
 
     // Puffs swell then shrink away; shreds fly out, fall and tumble.

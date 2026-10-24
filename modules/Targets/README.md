@@ -16,14 +16,19 @@ of `Radius` (9 m) around `Position`.
 ## Core (`Core/`)
 
 `TargetsModule` (the `IModule`): 5 balloons tethered around the 4 km x 4 km area centered on
-the origin, 340 to 470 m up, each swaying under 2 m around its tether point. Each has 15
+the origin, 340 to 470 m up, each swaying under 2 m around its tether point. The tether
+points come from World's `Terrain` (its Contract, `Neo.World`): `PlaceOnDryGround` moves a
+wanted spot over water (or within 30 m of it, `ShoreMargin`) to the nearest dry spot, in
+10 m rings, and raises it if needed so the balloon stays at least 150 m (`MinClearance`)
+above the terrain under it. `Anchor(id)` is where its cable is anchored: the ground
+(`Terrain.HeightAt`) under its tether point. Each has 15
 health; `DamageTarget` lowers it; at 0 it publishes `TargetDestroyed`, counts a pop
 (`Pops`, for the HUD) and comes back with full health 60 s later (`RespawnSeconds`) at the
 same spot. `GetState(id)` gives a balloon's current state. No allocations per Tick or per
 damage.
 
 `BalloonViews`: what the Godot view shows for each balloon, followed from the module's state
-(position, whether the shape with its cable is shown, pop effect age): a pop hides the shape
+(position, its cable from `CableTop` under the body down to `CableBottom`, the fixed anchor, whether the shape with its cable is shown, pop effect age): a pop hides the shape
 and plays the effect for 1.4 s (`PopSeconds`); a comeback shows the shape again at its spot.
 No Godot, so it is tested; no allocations per `Update`.
 
@@ -31,7 +36,8 @@ No Godot, so it is tested; no allocations per `Update`.
 
 Draws each balloon from its Core state (through `BalloonViews`) as a cartoon sausage-shaped observation balloon:
 cream toon-shaded body with red stripes, tail fins, a small basket, an ink outline (an
-inverted-hull overlay) and a cable down to the ground. When one pops it hides and plays a
+inverted-hull overlay) and a cable down to its anchor on the terrain
+(stretched each frame as the balloon sways; no winch truck is drawn). When one pops it hides and plays a
 cartoon pop: smoke puffs swelling and shreds flying out. Opened on its own (no module bound,
 as `screenshot.sh` does) it runs a preview with its own Core, sky, light and a camera on
 balloon 0, which pops after 1.5 s and comes back at 61.5 s; in the game it adds no camera or light.
@@ -45,6 +51,8 @@ popping, `FRAMES=118 ./screenshot.sh modules/Targets/Godot/Main.tscn Targets-pop
 `TargetsModuleTests` (with a fake bus): damage and destruction, one `TargetDestroyed` per
 pop with the shooter of the last hit (-1 when unknown), respawn after exactly 60 s at full
 health, the view state (`BalloonViews`: hidden while popped, shown again at its spot when
-back), states published every tick, placement and sway, no allocations.
+back), states published every tick, placement and sway, cables anchored at
+`Terrain.HeightAt` under each balloon, no balloon over water (a spot over a lake or the river
+moves to dry ground), at least 150 m above the terrain, no allocations.
 
 Test it alone: `./test.sh Targets`.

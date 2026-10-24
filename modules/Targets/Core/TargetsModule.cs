@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using Neo.Shell;
+using Neo.World;
 
 namespace Neo.Targets;
 
@@ -23,8 +24,15 @@ public sealed class TargetsModule : IModule
     /// <summary>Seconds a popped balloon stays down before it comes back.</summary>
     public const double RespawnSeconds = 60;
 
-    // Tether points spread around the 4 km x 4 km area centered on the origin, 300 to 500 m up.
-    private static readonly Vector3[] Anchors =
+    /// <summary>Least height (m) of a balloon above the terrain under it.</summary>
+    public const float MinClearance = 150f;
+
+    /// <summary>Least distance (m) from a balloon's tether point to the nearest water.</summary>
+    public const float ShoreMargin = 30f;
+
+    // Wanted tether spots spread around the 4 km x 4 km area centered on the origin, 300 to 500
+    // m up; PlaceOnDryGround moves them off water and up to clear the terrain.
+    private static readonly Vector3[] WantedSpots =
     {
         new(150f, 340f, -700f),
         new(-1450f, 420f, -1300f),
@@ -32,6 +40,18 @@ public sealed class TargetsModule : IModule
         new(-1300f, 380f, 1250f),
         new(1450f, 450f, 1100f),
     };
+
+    private static readonly Vector3[] Spots = new Vector3[Count];
+    private static readonly Vector3[] Grounds = new Vector3[Count];
+
+    static TargetsModule()
+    {
+        for (int i = 0; i < Count; i++)
+        {
+            Spots[i] = PlaceOnDryGround(WantedSpots[i]);
+            Grounds[i] = new Vector3(Spots[i].X, Terrain.HeightAt(Spots[i].X, Spots[i].Z), Spots[i].Z);
+        }
+    }
 
     private readonly Vector3[] _positions = new Vector3[Count];
     private readonly int[] _health = new int[Count];
@@ -54,6 +74,57 @@ public sealed class TargetsModule : IModule
     /// <summary>Current state of balloon <paramref name="targetId"/> (0 to Count - 1).</summary>
     public TargetState GetState(int targetId) =>
         new(targetId, _positions[targetId], HitRadius, _health[targetId], _health[targetId] > 0);
+
+    /// <summary>
+    /// Where balloon <paramref name="targetId"/>'s cable (and winch) is anchored: the ground
+    /// (<see cref="Terrain.HeightAt"/>) under its tether point. Fixed; the balloon sways around
+    /// the point straight above it.
+    /// </summary>
+    public static Vector3 Anchor(int targetId) => Grounds[targetId];
+
+    /// <summary>
+    /// The tether spot used for <paramref name="wanted"/>: the nearest point (searched in 10 m
+    /// rings, up to 600 m out) whose ground is dry for <see cref="ShoreMargin"/> m around, at
+    /// the wanted height or higher, so that it stays <see cref="MinClearance"/> m (plus room for
+    /// the sway) above the highest ground within 20 m.
+    /// </summary>
+    public static Vector3 PlaceOnDryGround(Vector3 wanted)
+    {
+        float x = wanted.X, z = wanted.Z;
+        for (int ring = 0; ring <= 60; ring++)
+        {
+            float r = ring * 10f;
+            int directions = ring == 0 ? 1 : 32;
+            bool found = false;
+            for (int d = 0; d < directions && !found; d++)
+            {
+                float a = d * MathF.Tau / directions;
+                float cx = wanted.X + r * MathF.Cos(a), cz = wanted.Z + r * MathF.Sin(a);
+                if (DryAround(cx, cz))
+                {
+                    x = cx;
+                    z = cz;
+                    found = true;
+                }
+            }
+            if (found)
+                break;
+        }
+        float highest = Terrain.WaterLevel;
+        for (float dx = -20f; dx <= 20f; dx += 5f)
+            for (float dz = -20f; dz <= 20f; dz += 5f)
+                highest = MathF.Max(highest, Terrain.HeightAt(x + dx, z + dz));
+        return new Vector3(x, MathF.Max(wanted.Y, highest + MinClearance + 5f), z);
+    }
+
+    private static bool DryAround(float x, float z)
+    {
+        for (float dx = -ShoreMargin; dx <= ShoreMargin; dx += 10f)
+            for (float dz = -ShoreMargin; dz <= ShoreMargin; dz += 10f)
+                if (Terrain.IsWater(x + dx, z + dz))
+                    return false;
+        return true;
+    }
 
     public void Start(IMessageBus bus)
     {
@@ -98,7 +169,7 @@ public sealed class TargetsModule : IModule
                 1.2f * MathF.Sin(0.35f * t + phase),
                 0.5f * MathF.Sin(0.5f * t + 2.1f * phase),
                 0.9f * MathF.Sin(0.27f * t + 1.6f * phase));
-            _positions[i] = Anchors[i] + sway;
+            _positions[i] = Spots[i] + sway;
         }
     }
 

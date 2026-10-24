@@ -9,5 +9,6 @@
   <ItemGroup>
     <ProjectReference Include="../../../shell/Contract/Neo.Shell.Contract.csproj" />
     <ProjectReference Include="../Contract/Neo.Targets.Contract.csproj" />
+    <ProjectReference Include="../../World/Contract/Neo.World.Contract.csproj" />
   </ItemGroup>
 </Project>

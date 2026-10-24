@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Reflection;
 using System.Runtime.Versioning;
 using Neo.Shell;
+using Neo.World;
 using Xunit;
 
 namespace Neo.Targets.Tests;
@@ -105,6 +106,86 @@ public class TargetsModuleTests
                 var flatB = new Vector2(first[b].X, first[b].Z);
                 Assert.True(Vector2.Distance(flatA, flatB) > 800f, $"balloons {a} and {b} are too close");
             }
+    }
+
+    [Fact]
+    public void BalloonsStayOverDryGroundAndAtLeast150MetersAboveTheTerrain()
+    {
+        var (targets, _) = Started();
+        Assert.Equal(150f, TargetsModule.MinClearance);
+        for (int i = 0; i < 60 * 60; i++)
+        {
+            targets.Tick(in OneStep);
+            for (int id = 0; id < TargetsModule.Count; id++)
+            {
+                var p = targets.GetState(id).Position;
+                Assert.False(Terrain.IsWater(p.X, p.Z), $"balloon {id} is over water at ({p.X}, {p.Z})");
+                float clearance = p.Y - Terrain.HeightAt(p.X, p.Z);
+                Assert.True(clearance >= 150f, $"balloon {id} is only {clearance} m above the terrain");
+            }
+        }
+    }
+
+    [Fact]
+    public void EachCableIsAnchoredOnTheTerrainUnderItsBalloon()
+    {
+        var (targets, _) = Started();
+        var views = new BalloonViews(targets);
+        var anchors = new Vector3[TargetsModule.Count];
+        bool someAboveSeaLevel = false;
+        for (int id = 0; id < TargetsModule.Count; id++)
+        {
+            var anchor = TargetsModule.Anchor(id);
+            anchors[id] = anchor;
+            Assert.Equal(Terrain.HeightAt(anchor.X, anchor.Z), anchor.Y);
+            Assert.False(Terrain.IsWater(anchor.X, anchor.Z), $"balloon {id}'s winch stands in water");
+            someAboveSeaLevel |= anchor.Y > 10f; // on a hill, not at y = 0 as it used to be
+            var p = targets.GetState(id).Position;
+            Assert.True(new Vector2(p.X - anchor.X, p.Z - anchor.Z).Length() < 3f, $"balloon {id} is not above its anchor");
+        }
+        Assert.True(someAboveSeaLevel);
+
+        for (int i = 0; i < 600; i++)
+        {
+            targets.Tick(in OneStep);
+            views.Update(1f / 60);
+        }
+        for (int id = 0; id < TargetsModule.Count; id++)
+        {
+            Assert.Equal(anchors[id], views.CableBottom(id)); // the anchor stays put
+            Assert.Equal(views.Position(id) + BalloonViews.CableAttach, views.CableTop(id)); // the top sways along
+            Assert.True(views.CableTop(id).Y - views.CableBottom(id).Y > 140f);
+        }
+    }
+
+    [Theory]
+    [InlineData(-700f, -900f)] // the middle of the west lake
+    [InlineData(850f, 1150f)] // the middle of the east lake
+    [InlineData(0f, 0f)] // on the river (x = its center line at z = 0)
+    public void ASpotOverWaterIsMovedSlightlyToDryGround(float x, float z)
+    {
+        if (x == 0f)
+            x = Terrain.RiverX(z);
+        Assert.True(Terrain.IsWater(x, z));
+        var spot = TargetsModule.PlaceOnDryGround(new Vector3(x, 400f, z));
+        Assert.False(Terrain.IsWater(spot.X, spot.Z));
+        Assert.True(Terrain.WaterDepthAt(spot.X, spot.Z) == 0f);
+        float moved = new Vector2(spot.X - x, spot.Z - z).Length();
+        Assert.InRange(moved, 1f, 400f);
+        Assert.Equal(400f, spot.Y);
+    }
+
+    [Fact]
+    public void ASpotOnDryGroundStaysAndOneTooLowIsRaisedClearOfTheTerrain()
+    {
+        var dry = TargetsModule.PlaceOnDryGround(new Vector3(150f, 340f, -700f));
+        Assert.Equal(new Vector3(150f, 340f, -700f), dry);
+
+        // The top of the tallest mountain (250 m): a balloon wanted at 300 m goes up.
+        var peak = TargetsModule.PlaceOnDryGround(new Vector3(-1450f, 300f, -500f));
+        Assert.Equal(-1450f, peak.X);
+        Assert.Equal(-500f, peak.Z);
+        Assert.True(peak.Y - Terrain.HeightAt(peak.X, peak.Z) >= 150f);
     }
 
     [Fact]
