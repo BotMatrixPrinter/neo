@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using Neo.Input;
+using Neo.World;
 
 namespace Neo.Flight;
 
@@ -8,11 +9,11 @@ namespace Neo.Flight;
 /// Arcade flight of one plane: not a simulation. The plane always flies along its nose at
 /// a speed between <see cref="MinSpeed"/> and <see cref="DiveMaxSpeed"/> (no stall, no spin; the
 /// throttle sets the level speed, gravity along the flight path slows climbs and speeds up dives),
-/// turns at fixed body rates, and is kept above <see cref="FloorAltitude"/> and inside the
-/// <see cref="AreaHalfSize"/> square by steering it gently away. No hard ceiling: the engine loses
+/// turns at fixed body rates, and is kept inside the <see cref="AreaHalfSize"/> square by steering it
+/// gently away. Nothing keeps it off the ground: flying into World's terrain is a crash (<see cref="JustCrashed"/>). No hard ceiling: the engine loses
 /// power as the plane climbs, until at <see cref="PowerAltitude"/> full throttle only holds level
 /// flight, so climbs level off there by themselves. Damage slows it, drags it into a roll and weakens its tail; a downed plane falls
-/// to the ground until it respawns. A collision (<see cref="ApplyImpulse"/>) shoves it aside and sets it spinning briefly, both
+/// to the ground; a crashed or downed plane rests there until it respawns. A collision (<see cref="ApplyImpulse"/>) shoves it aside and sets it spinning briefly, both
 /// fading over about a second.
 /// Deterministic; Step does not allocate.
 /// </summary>
@@ -52,13 +53,9 @@ public sealed class FlightModel
     /// <summary>Time constant (s) with which a climb too steep for the speed is eased down (the nose drops gently).</summary>
     public const float LowSpeedResponse = 0.5f;
 
-    public const float FloorAltitude = 20f;
     public const float AreaHalfSize = 2000f;
     /// <summary>Distance from the border where the plane starts turning back.</summary>
     public const float BorderMargin = 400f;
-    /// <summary>Height above the floor kept free, plus the drop of the next seconds of descent.</summary>
-    public const float FloorMargin = 40f;
-    public const float FloorLookahead = 2.5f;
     /// <summary>Height (m) where full throttle only just holds level flight (at <see cref="PowerAltitudeSpeed"/>):
     /// the engine's power falls with height (see <see cref="AltitudePowerLoss"/>), its climbing power is gone here
     /// and above it there is not even enough for level flight, so the plane sinks back. Not a limit: nothing clamps.</summary>
@@ -96,8 +93,9 @@ public sealed class FlightModel
     public const float FallPitchRate = 40f * Deg;
     public const float FallSpinRate = 90f * Deg;
     public const float FallTurnRate = 25f * Deg;
-    /// <summary>Height of the ground (World's GroundY): a downed plane stops here.</summary>
-    public const float GroundAltitude = 0f;
+    /// <summary>Height (m) of the plane's lowest point below its position: it crashes when that point is at or
+    /// below the terrain (<see cref="Terrain.HeightAt"/>), and then rests on the ground there.</summary>
+    public const float CrashClearance = 1.5f;
 
     /// <summary>Time constant (s) with which a collision's knock velocity and spin fade: about 4% is left after 1 s.</summary>
     public const float KnockTimeConstant = 0.3f;
@@ -117,6 +115,8 @@ public sealed class FlightModel
     private float _engine = 1f, _leftWing = 1f, _rightWing = 1f, _tail = 1f;
     private bool _alive = true;
     private bool _grounded;
+    private bool _justCrashed;
+    private float _crashSpeed;
     private bool _repairing;
     /// <summary>A collision's shove (world m/s), on top of the flight along the nose; fades with <see cref="KnockTimeConstant"/>.</summary>
     private Vector3 _knock;
@@ -150,6 +150,10 @@ public sealed class FlightModel
     public bool Alive => _alive;
     /// <summary>Down and come to rest on the ground.</summary>
     public bool Grounded => _grounded;
+    /// <summary>True for the step in which the plane hit the ground (flying or falling); false otherwise.</summary>
+    public bool JustCrashed => _justCrashed;
+    /// <summary>Speed (m/s) the plane hit the ground at; 0 before any crash.</summary>
+    public float CrashSpeed => _crashSpeed;
     /// <summary>Max level speed with the engine's current health, at the ground (dives go faster; height lowers it,
     /// see <see cref="LevelMaxSpeed"/>).</summary>
     public float MaxSpeedNow => MaxSpeedNowFor(_engine);
@@ -205,7 +209,7 @@ public sealed class FlightModel
 
     /// <summary>
     /// A collision's bounce (Collisions' <c>CollisionImpulse</c>): moves the plane by <paramref name="separation"/> at
-    /// once (inside the floor and border), changes its speed by the part of <paramref name="velocityChange"/> along the
+    /// once (inside the border), changes its speed by the part of <paramref name="velocityChange"/> along the
     /// nose (within <see cref="MinSpeed"/>..<see cref="DiveMaxSpeed"/>) and keeps the rest (sideways, plus what the
     /// limits cut off) as a knock velocity on top of its flight; adds <paramref name="angularKick"/> (body rad/s: x pitch,
     /// y yaw, z roll) to its turn rates. Knock and spin fade with <see cref="KnockTimeConstant"/>. Ignored when the
@@ -231,10 +235,9 @@ public sealed class FlightModel
 
     private static bool Finite(Vector3 v) => float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
 
-    /// <summary>Backstop only: the guard steering normally keeps the plane well inside these. No ceiling.</summary>
+    /// <summary>Backstop only: the border guard normally keeps the plane well inside these. No ceiling, no floor.</summary>
     private void ClampToArea()
     {
-        _position.Y = MathF.Max(_position.Y, FloorAltitude);
         _position.X = Math.Clamp(_position.X, -AreaHalfSize, AreaHalfSize);
         _position.Z = Math.Clamp(_position.Z, -AreaHalfSize, AreaHalfSize);
     }
@@ -244,6 +247,8 @@ public sealed class FlightModel
     {
         _alive = true;
         _grounded = false;
+        _justCrashed = false;
+        _crashSpeed = 0f;
         _repairing = false;
         _engine = _leftWing = _rightWing = _tail = 1f;
         _pitchCmd = _rollCmd = _yawCmd = 0f;
@@ -284,6 +289,7 @@ public sealed class FlightModel
     /// <summary>One fixed step of <paramref name="dt"/> seconds with the pilot's controls.</summary>
     public void Step(in ControlInput input, float dt)
     {
+        _justCrashed = false;
         if (!_alive)
         {
             Fall(dt);
@@ -301,12 +307,10 @@ public sealed class FlightModel
         _handsOffTime = handsOff ? _handsOffTime + dt : 0f;
 
         float pitch, roll, yaw;
-        bool guarded = GuardDirection(forward, out Vector3 guard, out bool low);
-        if (guarded)
+        if (GuardDirection(forward, out Vector3 guard))
         {
             Steer(guard, out pitch, out roll, out yaw);
-            // Once clear, hands off keeps what the guard left (never a dive after a floor pull-up).
-            _holdClimb = low ? MathF.Max(climb, 0f) : climb;
+            _holdClimb = climb; // once clear, hands off keeps what the guard left
         }
         else if (input.HasAim && !_repairing)
             Steer(input.AimDirection, out pitch, out roll, out yaw);
@@ -320,9 +324,9 @@ public sealed class FlightModel
         }
 
         // Too slow to keep climbing (or, high up, too little power even at the minimum speed): the nose drops
-        // gently until the speed is back (the floor guard still wins).
+        // gently until the speed is back.
         float maxClimbSine = LowSpeedMaxClimbSine;
-        if (maxClimbSine < 1f && !(guarded && low))
+        if (maxClimbSine < 1f)
             ClimbLimit(climb, MathF.Asin(maxClimbSine), LowSpeedResponse, ref pitch, ref yaw);
 
         // A damaged wing drags the plane into a roll toward its side.
@@ -354,6 +358,12 @@ public sealed class FlightModel
 
         _position += (forward * _speed + _knock) * dt;
         ClampToArea();
+        if (HitGround())
+        {
+            _alive = false;
+            _knock = _kick = Vector3.Zero;
+            return;
+        }
 
         // A collision's knock and spin fade smoothly, then the plane flies on normally.
         float fade = MathF.Exp(-dt / KnockTimeConstant);
@@ -395,47 +405,45 @@ public sealed class FlightModel
         _position += forward * (_speed * dt);
         _position.X = Math.Clamp(_position.X, -AreaHalfSize, AreaHalfSize);
         _position.Z = Math.Clamp(_position.Z, -AreaHalfSize, AreaHalfSize);
-        if (_position.Y <= GroundAltitude)
-        {
-            _position.Y = GroundAltitude;
-            _speed = 0f;
-            _grounded = true;
-        }
+        HitGround();
     }
 
-    /// <summary>A direction to steer to instead of the pilot when near the floor or the border.</summary>
-    private bool GuardDirection(Vector3 forward, out Vector3 direction, out bool low)
+    /// <summary>
+    /// If the plane's lowest point (<see cref="CrashClearance"/> below it) is at or below the terrain, it has
+    /// crashed: it stops there, on the ground, and <see cref="JustCrashed"/> is set for this step.
+    /// </summary>
+    private bool HitGround()
     {
-        float descent = MathF.Max(0f, -(forward.Y * _speed + _knock.Y)) * FloorLookahead;
-        low = _position.Y - FloorAltitude - descent < FloorMargin;
+        float ground = Terrain.HeightAt(_position.X, _position.Z);
+        if (_position.Y - CrashClearance > ground)
+            return false;
+        _position.Y = ground;
+        _crashSpeed = _speed;
+        _speed = 0f;
+        _grounded = true;
+        _justCrashed = true;
+        return true;
+    }
+
+    /// <summary>A direction to steer to instead of the pilot when near the border and heading out.</summary>
+    private bool GuardDirection(Vector3 forward, out Vector3 direction)
+    {
         float edge = AreaHalfSize - BorderMargin;
         bool outX = (_position.X > edge && forward.X > 0f) || (_position.X < -edge && forward.X < 0f);
         bool outZ = (_position.Z > edge && forward.Z > 0f) || (_position.Z < -edge && forward.Z < 0f);
-        if (!low && !outX && !outZ)
+        if (!outX && !outZ)
         {
             direction = default;
             return false;
         }
 
-        Vector3 horizontal;
-        if (outX || outZ)
-            horizontal = new Vector3(-_position.X, 0f, -_position.Z);
-        else
-        {
-            horizontal = new Vector3(forward.X, 0f, forward.Z);
-            if (horizontal.LengthSquared() < 0.01f)
-            {
-                // Nose straight down: pull out the way the plane's belly-to-canopy points.
-                Vector3 up = Vector3.Transform(Vector3.UnitY, _orientation);
-                horizontal = new Vector3(up.X, 0f, up.Z);
-            }
-        }
+        Vector3 horizontal = new Vector3(-_position.X, 0f, -_position.Z);
         if (horizontal.LengthSquared() < 1e-6f)
             horizontal = -Vector3.UnitZ;
         horizontal = Vector3.Normalize(horizontal);
 
-        // Low: climb gently (about 20 degrees). Otherwise keep the current climb or dive, mildly.
-        float rise = low ? 0.35f : Math.Clamp(forward.Y, -0.3f, 0.3f);
+        // Keep the current climb or dive, mildly.
+        float rise = Math.Clamp(forward.Y, -0.3f, 0.3f);
         direction = Vector3.Normalize(horizontal + new Vector3(0f, rise, 0f));
         return true;
     }

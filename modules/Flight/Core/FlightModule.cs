@@ -11,7 +11,7 @@ namespace Neo.Flight;
 /// <see cref="ControlInput"/> for it, applies the Damage module's part health, downings and
 /// respawns and in-flight repairs (steering ignored while repairing), the Collisions module's
 /// bounces (<see cref="CollisionImpulse"/>), and publishes every plane's <see cref="PlaneState"/> after every fixed step, in id
-/// order. Allocation-free per tick.
+/// order, then a <see cref="PlaneCrashed"/> for each plane that hit World's terrain in that step. Allocation-free per tick.
 /// </summary>
 public sealed class FlightModule : IModule, IMessageHandler<ControlInput>, IMessageHandler<PlaneDamageState>,
     IMessageHandler<PlaneDestroyed>, IMessageHandler<PlaneRespawn>, IMessageHandler<RepairState>,
@@ -93,6 +93,12 @@ public sealed class FlightModule : IModule, IMessageHandler<ControlInput>, IMess
             return;
         for (int id = 0; id < _models.Length; id++)
             _bus.Publish(_models[id].State);
+        for (int id = 0; id < _models.Length; id++)
+        {
+            FlightModel model = _models[id];
+            if (model.JustCrashed)
+                _bus.Publish(new PlaneCrashed(id, model.Position, model.CrashSpeed));
+        }
     }
 
     private static bool IsPlane(int planeId) => (uint)planeId < Teams.PlaneCount;

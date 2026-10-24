@@ -175,10 +175,22 @@ public class FlightModuleTests
         var climb = rig.Fly(Aim(Vector3.Normalize(new Vector3(0f, 1f, -0.2f)), throttle: 0f), 20f, InRange);
         Assert.InRange(climb.Speed, 25f, 26f); // slowed to the minimum, still flying
 
+        // Random flying: whenever it flies into the ground it respawns (as Damage would); in flight the speed stays in range.
         rig = new Rig();
         uint seed = 7;
+        int flying = 0;
         for (int i = 0; i < 60 * 120; i++)
-            InRange(rig.Step(RandomInput(ref seed, i)));
+        {
+            var s = rig.Step(RandomInput(ref seed, i));
+            if (s.Alive)
+            {
+                InRange(s);
+                flying++;
+            }
+            else
+                rig.Bus.Publish(new PlaneRespawn(0));
+        }
+        Assert.True(flying > 60 * 60, $"flew {flying} steps");
     }
 
     /// <summary>Plane 0 and plane 1 (side by side) fly the same aim for <paramref name="seconds"/>.</summary>
@@ -291,7 +303,7 @@ public class FlightModuleTests
         {
             Assert.True(p.Speed <= FlightModel.DiveMaxSpeed, $"capped: {p.Speed}");
             Assert.InRange(p.Velocity.Length(), p.Speed - 0.01f, p.Speed + 0.01f);
-            Assert.True(p.Position.Y > FlightModel.FloorAltitude);
+            Assert.True(p.Alive && Clearance(p) > 0f, "still in the air");
             if (Climb(p) < -30f * Deg)
                 Assert.True(p.Speed >= previous - 1e-4f, "diving loses no speed");
             previous = p.Speed;
@@ -553,61 +565,177 @@ public class FlightModuleTests
         var end = rig.Bus.States[0];
         Assert.True(Vector3.Transform(Vector3.UnitY, end.Orientation).Y > 0.999f, "upright");
         Assert.True(MathF.Abs(Climb(end)) < 1f * Deg);
-        Assert.True(end.Position.Y > FlightModel.FloorAltitude + FlightModel.FloorMargin);
+        Assert.True(end.Alive);
+    }
+
+    /// <summary>Height (m) of plane <paramref name="s"/>'s lowest point above World's terrain under it.</summary>
+    private static float Clearance(in PlaneState s) =>
+        s.Position.Y - FlightModel.CrashClearance - Neo.World.Terrain.HeightAt(s.Position.X, s.Position.Z);
+
+    /// <summary>
+    /// Ticks with <paramref name="input"/> for plane <paramref name="input"/>.PlaneId until it is down (at most
+    /// 60 s), checking that it was alive and above the ground until then; returns its last state.
+    /// </summary>
+    private static PlaneState FlyUntilCrash(Rig rig, Func<PlaneState, ControlInput> input)
+    {
+        if (rig.Bus.StatesPublished == 0)
+            rig.Tick();
+        int id = input(rig.Bus.States[0]).PlaneId;
+        var previous = rig.Bus.States[id];
+        for (int i = 0; i < 60 * 60; i++)
+        {
+            rig.Bus.Publish(input(rig.Bus.States[id]));
+            rig.Tick();
+            var s = rig.Bus.States[id];
+            if (!s.Alive)
+            {
+                Assert.True(Clearance(previous) > 0f, "flew until its lowest point reached the ground");
+                return s;
+            }
+            Assert.Equal(0, rig.Bus.CrashCount);
+            Assert.True(Clearance(s) > 0f, $"alive below ground at {s.Position}");
+            previous = s;
+        }
+        throw new InvalidOperationException("never reached the ground");
+    }
+
+    /// <summary>Plane <paramref name="id"/> has just crashed at <paramref name="s"/>: one PlaneCrashed, at rest on the terrain.</summary>
+    private static void AssertCrashedOnTheGround(Rig rig, int id, PlaneState s, float minSpeed)
+    {
+        Assert.False(s.Alive);
+        Assert.Equal(Neo.World.Terrain.HeightAt(s.Position.X, s.Position.Z), s.Position.Y);
+        Assert.Equal(Vector3.Zero, s.Velocity);
+        Assert.Equal(1, rig.Bus.CrashCount);
+        var crash = rig.Bus.Crashes[0];
+        Assert.Equal(id, crash.PlaneId);
+        Assert.Equal(s.Position, crash.Position);
+        Assert.True(crash.Speed >= minSpeed, $"hit at {crash.Speed} m/s");
+        Assert.True(rig.Module.Plane(id).Grounded);
+
+        // It stays there, down, and crashes only once.
+        rig.Run(3f, () =>
+        {
+            var p = rig.Bus.States[id];
+            Assert.False(p.Alive);
+            Assert.Equal(s.Position, p.Position);
+            Assert.Equal(Vector3.Zero, p.Velocity);
+        });
+        Assert.Equal(1, rig.Bus.CrashCount);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(5)]
+    public void Crash_DivingPlaneHitsTheGroundAtTheTerrainHeight_OnePlaneCrashed(int id)
+    {
+        // Stick held full forward, full throttle, player and bot: no pull-up, it flies into the ground.
+        var rig = new Rig();
+        var s = FlyUntilCrash(rig, _ => new ControlInput(id, -1f, 0f, 0f, 1f, false, false, Vector3.Zero));
+        AssertCrashedOnTheGround(rig, id, s, 40f);
+        for (int other = 0; other < Teams.PlaneCount; other++)
+            Assert.Equal(other != id, rig.Bus.States[other].Alive);
     }
 
     [Fact]
-    public void HandsOff_SteepDiveKeepsDivingUntilTheFloorGuardPullsUp()
+    public void Crash_IntoAHillsideStopsAtTheHillsHeight()
     {
-        // Steep dive (about 70 degrees nose down) from 400 m, then hands off: the dive is kept...
+        // Mouse aimed at the top of World's mountain north-west of the Allies' start: it hits the slope.
+        var peak = new Vector3(-850f, 0f, 950f);
+        peak.Y = Neo.World.Terrain.HeightAt(peak.X, peak.Z);
+        var rig = new Rig();
+        var s = FlyUntilCrash(rig, p => Aim(Vector3.Normalize(peak - p.Position), throttle: 1f));
+        Assert.True(s.Position.Y > 50f, $"on the hill at {s.Position}");
+        AssertCrashedOnTheGround(rig, 0, s, 30f);
+    }
+
+    [Fact]
+    public void NoFloorPullUp_HandsOffSteepDiveIsKeptAllTheWayIntoTheGround()
+    {
+        // Steep dive (about 70 degrees nose down) from 400 m, then hands off: the dive is kept, no pull-up.
         var rig = new Rig();
         float held = Climb(FlyUntil(rig, Sticks(pitch: -1f, throttle: 1f), s => Climb(s) < -70f * Deg));
-        var s = rig.Fly(Sticks(throttle: 1f), 1f);
-        Assert.True(MathF.Abs(Climb(s) - held) < 6f * Deg, $"dive kept: {held / Deg} -> {Climb(s) / Deg} deg");
-        // ...until the floor guard pulls up; then it keeps the climb the guard left (level at least), never diving back.
-        float lowest = float.MaxValue;
-        s = rig.Fly(Sticks(throttle: 1f), 8f, p => lowest = MathF.Min(lowest, p.Position.Y));
-        Assert.True(lowest > FlightModel.FloorAltitude + 1f, $"at {lowest} m");
-        float climb = Climb(s);
-        Assert.True(climb > -1f * Deg, $"not diving back: {climb / Deg} deg");
-        s = rig.Fly(Sticks(throttle: 1f), 3f);
-        Assert.True(MathF.Abs(Climb(s) - climb) < 1f * Deg, $"{climb / Deg} -> {Climb(s) / Deg} deg");
+        float steepest = held;
+        var previous = rig.Bus.States[0];
+        while (rig.Bus.States[0].Alive)
+        {
+            previous = rig.Bus.States[0];
+            var s = rig.Step(Sticks(throttle: 1f));
+            if (s.Alive)
+                Assert.True(MathF.Abs(Climb(s) - held) < 6f * Deg, $"dive kept: {held / Deg} -> {Climb(s) / Deg} deg at {s.Position.Y} m");
+        }
+        Assert.True(Climb(previous) < -60f * Deg, $"still diving steeply at the ground: {Climb(previous) / Deg} deg");
+        AssertCrashedOnTheGround(rig, 0, rig.Bus.States[0], 60f);
 
-        // Inverted steep dive held into the floor guard, then let go: the floor still wins, then the wings level.
+        // Inverted and pulling into a dive (a split-S), then hands off, and mouse aimed straight down: both crash.
         rig = new Rig();
         rig.Fly(Sticks(roll: 1f), 1f);
-        rig.Fly(Sticks(pitch: 1f, throttle: 1f), 3f);
-        lowest = float.MaxValue;
-        s = rig.Fly(Sticks(throttle: 1f), 12f, p => lowest = MathF.Min(lowest, p.Position.Y));
-        Assert.True(lowest > FlightModel.FloorAltitude + 1f, $"at {lowest} m");
-        Assert.True(MathF.Abs(Bank(s)) < 1f * Deg, $"bank {Bank(s) / Deg} climb {Climb(s) / Deg} at {s.Position}");
-        Assert.True(Climb(s) > -1f * Deg, "not diving back into the floor");
+        FlyUntil(rig, Sticks(pitch: 1f, throttle: 1f), p => Climb(p) < -60f * Deg);
+        AssertCrashedOnTheGround(rig, 0, FlyUntilCrash(rig, _ => Sticks(throttle: 1f)), 25f);
+        rig = new Rig();
+        AssertCrashedOnTheGround(rig, 0, FlyUntilCrash(rig, _ => Aim(-Vector3.UnitY, throttle: 1f)), 60f);
     }
 
     [Fact]
-    public void FloorHolds_PullsUpGentlyFromDives()
+    public void FlyingLowAboveTheGroundIsFine()
     {
-        void AboveFloor(PlaneState s) => Assert.True(s.Position.Y >= FlightModel.FloorAltitude, $"at {s.Position.Y} m");
-
-        // Stick held full forward, full throttle, for a minute.
+        // Plane 0 descends toward the open center (the plain), to 60 m, then to 9 m (7.5 m between its lowest
+        // point and the plain, at most 5 m high there): well inside the old floor guard's 60 m.
+        const float low = 9f;
         var rig = new Rig();
-        float lowest = float.MaxValue;
-        rig.Fly(Sticks(pitch: -1f, throttle: 1f), 60f, s => { AboveFloor(s); lowest = MathF.Min(lowest, s.Position.Y); });
-        Assert.True(lowest > FlightModel.FloorAltitude + 1f, "pulled up before touching the backstop");
+        rig.Tick();
+        ControlInput Hold(PlaneState p, float height)
+        {
+            float rise = Math.Clamp((height - p.Position.Y) * 0.02f, -0.4f, 0.4f);
+            return Aim(Vector3.Normalize(new Vector3(0f, rise, -1f)));
+        }
+        for (int i = 0; i < 60 * 60 && rig.Bus.States[0].Position.Z > 400f; i++)
+            rig.Step(Hold(rig.Bus.States[0], 60f));
+        for (int i = 0; i < 60 * 60 && rig.Bus.States[0].Position.Z > 0f; i++)
+        {
+            var p = rig.Step(Hold(rig.Bus.States[0], low));
+            Assert.True(p.Alive && Clearance(p) > 2f, $"at {p.Position}");
+        }
+        var s = rig.Bus.States[0];
+        Assert.InRange(s.Position.Y, low - 1f, low + 1f);
 
-        // Mouse aimed straight down.
-        rig = new Rig();
-        rig.Fly(Aim(-Vector3.UnitY, throttle: 1f), 60f, AboveFloor);
+        // ...then flies on hands off over the center: no pull-up, no crash, it keeps its height.
+        float lowest = float.MaxValue, highest = float.MinValue;
+        rig.Fly(Sticks(), 6f, p =>
+        {
+            Assert.True(p.Alive);
+            Assert.True(Clearance(p) > 2f, $"at {p.Position}");
+            lowest = MathF.Min(lowest, p.Position.Y);
+            highest = MathF.Max(highest, p.Position.Y);
+        });
+        Assert.True(highest - lowest < 2f, $"height {lowest}..{highest} m: no pull-up");
+        Assert.True(highest < low + 2f, "never pulled up");
+        Assert.True(rig.Bus.States[0].Position.Z < -200f, "flew on over the center");
+        Assert.Equal(0, rig.Bus.CrashCount);
+    }
 
-        // Inverted and pulling: a split-S into the ground.
-        rig = new Rig();
-        rig.Fly(Sticks(roll: 1f), 1f, AboveFloor);
-        rig.Fly(Sticks(pitch: 1f, throttle: 1f), 60f, AboveFloor);
+    [Fact]
+    public void Crash_RespawnRestoresThePlane_ItCanCrashAgain()
+    {
+        var rig = new Rig();
+        FlyUntilCrash(rig, _ => Sticks(pitch: -1f, throttle: 1f));
+        rig.Run(2f);
+        Assert.False(rig.Bus.States[0].Alive);
 
-        uint seed = 3;
-        rig = new Rig();
-        for (int i = 0; i < 60 * 120; i++)
-            AboveFloor(rig.Step(RandomInput(ref seed, i)));
+        rig.Bus.Publish(new PlaneRespawn(0));
+        var s = rig.Step(Sticks());
+        Assert.True(s.Alive);
+        Assert.False(rig.Module.Model.Grounded);
+        Assert.True(Vector3.Distance(s.Position, FlightModel.StartPosition(0)) < 2f, $"at {s.Position}");
+        Assert.InRange(s.Speed, FlightModel.MaxSpeed - 0.5f, FlightModel.MaxSpeed);
+        s = rig.Fly(Sticks(), 5f, p => Assert.True(p.Alive));
+        Assert.True(MathF.Abs(Climb(s)) < 1f * Deg, "flies on level");
+        Assert.Equal(1, rig.Bus.CrashCount);
+
+        // Into the ground again: a second PlaneCrashed.
+        for (int i = 0; i < 60 * 60 && rig.Bus.States[0].Alive; i++)
+            rig.Step(Aim(-Vector3.UnitY, throttle: 1f));
+        Assert.Equal(2, rig.Bus.CrashCount);
+        Assert.Equal(rig.Bus.States[0].Position, rig.Bus.Crashes[1].Position);
     }
 
     /// <summary>
@@ -1027,7 +1155,7 @@ public class FlightModuleTests
         float previousY = rig.Bus.States[2].Position.Y, spun = 0f, previousBank = Bank(rig.Bus.States[2]);
         float lowestClimb = 0f;
         int steps = 0;
-        while (rig.Bus.States[2].Position.Y > 0f)
+        while (!rig.Module.Plane(2).Grounded)
         {
             // The pilot's sticks do nothing any more.
             rig.Bus.Publish(new ControlInput(2, 1f, -1f, 1f, 1f, false, false, Vector3.Zero));
@@ -1050,9 +1178,13 @@ public class FlightModuleTests
         Assert.InRange(lowestClimb, -70f * Deg, -45f * Deg); // the nose dropped
         Assert.True(spun > 180f * Deg, "it spins");
 
-        // On the ground: stays there, still down.
+        // On the ground (World's terrain there): one PlaneCrashed, and it stays there, still down.
         var ground = rig.Bus.States[2];
-        Assert.Equal(0f, ground.Position.Y);
+        Assert.Equal(Neo.World.Terrain.HeightAt(ground.Position.X, ground.Position.Z), ground.Position.Y);
+        Assert.Equal(1, rig.Bus.CrashCount);
+        Assert.Equal(2, rig.Bus.Crashes[0].PlaneId);
+        Assert.Equal(ground.Position, rig.Bus.Crashes[0].Position);
+        Assert.True(rig.Bus.Crashes[0].Speed > FlightModel.MinSpeed, "hit at speed");
         rig.Run(3f, () =>
         {
             var s = rig.Bus.States[2];
@@ -1060,6 +1192,7 @@ public class FlightModuleTests
             Assert.Equal(ground.Position, s.Position);
             Assert.Equal(Vector3.Zero, s.Velocity);
         });
+        Assert.Equal(1, rig.Bus.CrashCount);
     }
 
     [Theory]
@@ -1169,19 +1302,10 @@ public class FlightModuleTests
     }
 
     [Fact]
-    public void Repairing_FloorAndBorderGuardsStillAct()
+    public void Repairing_BorderGuardStillActs()
     {
-        // A steep dive when the repair starts: the dive is kept until the floor guard pulls up.
-        var rig = new Rig();
-        FlyUntil(rig, Sticks(pitch: -1f, throttle: 1f), s => Climb(s) < -60f * Deg);
-        rig.Bus.Publish(Repair(0, true));
-        float lowest = float.MaxValue;
-        var end = rig.Fly(Sticks(pitch: -1f, throttle: 1f), 10f, s => lowest = MathF.Min(lowest, s.Position.Y));
-        Assert.True(lowest > FlightModel.FloorAltitude + 1f, $"at {lowest} m");
-        Assert.True(Climb(end) > -1f * Deg, "not diving back");
-
         // Repairing all the way to the north edge at full throttle: the border guard turns it back.
-        rig = new Rig();
+        var rig = new Rig();
         rig.Bus.Publish(Repair(0, true));
         float north = 0f, farthest = 0f;
         rig.Fly(Sticks(yaw: 1f, roll: 1f, throttle: 1f), 120f, s =>
@@ -1393,14 +1517,14 @@ public class FlightModuleTests
     }
 
     [Fact]
-    public void Collision_FloorAndBorderStillHold()
+    public void Collision_KnockedIntoTheGroundCrashes_BorderStillHolds()
     {
-        // Knocked down hard near the floor: never below it.
+        // Knocked down hard into the ground: no floor holds it, it crashes there once.
         var rig = new Rig();
         rig.Run(0.5f);
-        rig.Bus.Publish(new CollisionImpulse(0, new Vector3(0f, -60f, 0f), new Vector3(-3f, 0f, 0f), new Vector3(0f, -390f, 0f)));
-        Assert.Equal(FlightModel.FloorAltitude, rig.Module.Plane(0).Position.Y);
-        rig.Run(10f, () => Assert.True(rig.Bus.States[0].Position.Y >= FlightModel.FloorAltitude));
+        rig.Bus.Publish(new CollisionImpulse(0, new Vector3(0f, -60f, 0f), new Vector3(-3f, 0f, 0f), new Vector3(0f, -400f, 0f)));
+        rig.Tick();
+        AssertCrashedOnTheGround(rig, 0, rig.Bus.States[0], 25f);
 
         // Knocked out of the area: back at the edge at once, and stays inside.
         rig = new Rig();
@@ -1445,13 +1569,16 @@ public class FlightModuleTests
         var bounce = new CollisionImpulse(0, new Vector3(5f, 0f, 5f), new Vector3(0f, 0f, 2f), new Vector3(0.5f, 0f, 0f));
         rig.Bus.Publish(bounce);
         rig.Step(input);
+        var dive = new ControlInput(1, 0f, 0f, 0f, 1f, false, true, -Vector3.UnitY);
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 600; i++)
         {
             if (i % 120 == 0)
                 rig.Bus.Publish(bounce); // collisions too
+            rig.Bus.Publish(dive); // and plane 1 flies into the ground
             rig.Step(input);
         }
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
+        Assert.Equal(1, rig.Bus.CrashCount);
     }
 }
