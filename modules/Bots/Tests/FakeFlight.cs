@@ -7,11 +7,15 @@ namespace Neo.Bots.Tests;
 
 /// <summary>
 /// A tiny stand-in for the Flight module's stick model (same rates, smoothing and bank turn,
-/// throttle sets the level speed 25..60 m/s, no diving speed, no guards), so tests can fly a bot in closed loop with fake PlaneStates.
+/// throttle sets the level speed 25..60 m/s, diving gains speed and climbing loses it at
+/// 6 m/s² per g, clamped to 25..60; a hard ceiling at 1000 m; no floor or border guards), so
+/// tests can fly a bot in closed loop with fake PlaneStates.
 /// </summary>
 internal sealed class FakeFlight
 {
     private const float Deg = MathF.PI / 180f;
+    /// <summary>Flight's ceiling, m.</summary>
+    public const float Ceiling = 1000f;
     private float _pitch, _roll, _yaw;
 
     public PlaneState Step(in PlaneState s, in ControlInput input, float dt)
@@ -29,8 +33,15 @@ internal sealed class FakeFlight
         Vector3 forward = Vector3.Transform(-Vector3.UnitZ, q);
         float level = input.Throttle < 0.5f ? 25f + 34f * input.Throttle : 42f + 36f * (input.Throttle - 0.5f);
         float speed = s.Speed + (level - s.Speed) * MathF.Min(1f, 0.5f * dt);
+        speed = Math.Clamp(speed - forward.Y * 6f * dt, 25f, 60f);
         Vector3 velocity = forward * speed;
-        return new PlaneState(s.PlaneId, s.Position + velocity * dt, q, velocity, speed, input.Throttle, s.Alive);
+        Vector3 position = s.Position + velocity * dt;
+        if (position.Y > Ceiling)
+        {
+            position.Y = Ceiling;
+            velocity.Y = 0f;
+        }
+        return new PlaneState(s.PlaneId, position, q, velocity, speed, input.Throttle, s.Alive);
     }
 
     /// <summary>A plane at <paramref name="position"/> flying level toward <paramref name="heading"/> (horizontal), at <paramref name="speed"/>.</summary>

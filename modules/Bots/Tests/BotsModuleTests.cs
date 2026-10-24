@@ -240,34 +240,341 @@ public class BotsModuleTests
         Assert.True(at.Input(4).Yaw > 0.1f, $"yaw {at.Input(4).Yaw}");
     }
 
+    private static bool IsEvasion(BotMode mode)
+        => mode is BotMode.Break or BotMode.Extend or BotMode.SplitS or BotMode.RollAway;
+
+    private static float Elevation(in PlaneState s) => MathF.Asin(Math.Clamp(Nose(s).Y, -1f, 1f));
+
+    /// <summary>
+    /// Puts <paramref name="chaser"/> <paramref name="behind"/> m behind bot <paramref name="bot"/>
+    /// along its nose, <paramref name="right"/> m to its right and 10 m above it (its body
+    /// axes), nose on the bot: a pursuer that follows every move and cannot be shaken off.
+    /// </summary>
+    private static void Stick(Rig rig, int chaser, int bot, float behind = 150f, float right = 30f)
+    {
+        PlaneState b = rig.States[bot];
+        Vector3 p = b.Position + Vector3.Transform(new Vector3(right, 10f, behind), b.Orientation);
+        Vector3 look = Vector3.Normalize(b.Position - p);
+        Vector3 up = Vector3.Transform(Vector3.UnitY, b.Orientation);
+        Quaternion q = Quaternion.CreateFromRotationMatrix(Matrix4x4.CreateWorld(Vector3.Zero, look, up));
+        rig.Set(FakeFlight.Plane(chaser, p, q, speed: b.Speed));
+    }
+
     [Fact]
-    public void BreaksHardWhenAnEnemySitsOnItsTail()
+    public void EvadesAfterItsReactionDelayWhenAnEnemySitsOnItsTail()
     {
         var rig = new Rig();
         rig.Set(FakeFlight.Plane(4, new Vector3(0f, 400f, 0f), North));
         rig.Set(FakeFlight.Plane(1, new Vector3(20f, 400f, 150f), North)); // 150 m behind, nose on us
         rig.Step();
-        Assert.NotEqual(BotMode.Break, rig.Module.Pilot(4).Mode); // reaction delay
+        Assert.False(IsEvasion(rig.Module.Pilot(4).Mode)); // reaction delay
         for (int i = 0; i < 60; i++)
             rig.Step();
-        Assert.Equal(BotMode.Break, rig.Module.Pilot(4).Mode);
-        ControlInput input = rig.Input(4);
-        Assert.True(input.Roll > 0.9f, $"hard roll toward the attacker's side, roll {input.Roll}");
-        Assert.False(input.Fire);
-        Assert.Equal(1f, input.Throttle);
-
-        // Once banked, it pulls hard.
-        var banked = new Rig();
-        banked.Set(FakeFlight.Plane(4, new Vector3(0f, 400f, 0f), FakeFlight.Facing(North) * Quaternion.CreateFromAxisAngle(Vector3.UnitZ, -80f * Deg)));
-        banked.Set(FakeFlight.Plane(1, new Vector3(0f, 400f, 150f), North));
-        for (int i = 0; i < 60; i++)
-            banked.Step();
-        Assert.Equal(BotMode.Break, banked.Module.Pilot(4).Mode);
-        Assert.Equal(1f, banked.Input(4).Pitch);
+        Assert.True(IsEvasion(rig.Module.Pilot(4).Mode), $"mode {rig.Module.Pilot(4).Mode}");
+        Assert.Equal(1, rig.Module.Pilot(4).ChaserId);
+        Assert.False(rig.Input(4).Fire);
+        Assert.Equal(1f, rig.Input(4).Throttle);
     }
 
     [Fact]
-    public void DoesNotBreakForAnEnemyFarBehindOrFlyingAway()
+    public void BreaksTowardTheAttackersSide()
+    {
+        // Every bot, chased from the right rear and from the left rear at 400 m and 50 m/s:
+        // whenever it picks a break, it rolls hard toward the attacker and pulls once banked.
+        int breaks = 0;
+        foreach (float sign in new[] { 1f, -1f })
+        {
+            for (int bot = 1; bot < Teams.PlaneCount; bot++)
+            {
+                int enemy = Teams.IsAllies(bot) ? 5 : 1;
+                var rig = new Rig();
+                rig.Set(FakeFlight.Plane(bot, new Vector3(0f, 400f, 0f), North), flown: true);
+                Stick(rig, enemy, bot, 150f, 40f * sign);
+                int i = 0;
+                while (!IsEvasion(rig.Module.Pilot(bot).Mode) && i++ < 60)
+                {
+                    Stick(rig, enemy, bot, 150f, 40f * sign);
+                    rig.Step();
+                }
+                Assert.True(IsEvasion(rig.Module.Pilot(bot).Mode), $"bot {bot} never evaded");
+                if (rig.Module.Pilot(bot).Mode != BotMode.Break)
+                    continue;
+                breaks++;
+                Assert.True(rig.Input(bot).Roll * sign > 0.4f, $"bot {bot} rolls {rig.Input(bot).Roll}, attacker on side {sign}"); // full roll, give or take a jink
+                // Over the next second: banks steeply toward the attacker (never the other way)
+                // and pulls (full pull once banked, give or take a jink).
+                float most = 0f, least = 1f, pull = 0f;
+                for (int k = 0; k < 60; k++)
+                {
+                    Stick(rig, enemy, bot, 150f, 40f * sign);
+                    rig.Step();
+                    float toward = -Vector3.Transform(Vector3.UnitX, rig.States[bot].Orientation).Y * sign;
+                    most = MathF.Max(most, toward);
+                    least = MathF.Min(least, toward);
+                    if (k >= 30)
+                        pull += rig.Input(bot).Pitch / 30f;
+                }
+                Assert.True(most > MathF.Sin(70f * Deg), $"bot {bot} banked at most {MathF.Asin(most) / Deg} deg toward side {sign}");
+                Assert.True(least > -MathF.Sin(10f * Deg), $"bot {bot} banked away from side {sign}");
+                Assert.True(pull > 0.5f, $"bot {bot} pulls {pull} on average");
+            }
+        }
+        Assert.True(breaks >= 4, $"only {breaks} breaks in 14 encounters");
+    }
+
+    [Fact]
+    public void VariesItsMovesPerBotAndEncounter()
+    {
+        // The same bot chased again and again (the pursuer leaves, comes back) picks different
+        // moves; and different bots pick different first moves.
+        var kinds = new System.Collections.Generic.HashSet<BotMode>();
+        var firsts = new System.Collections.Generic.HashSet<BotMode>();
+        for (int bot = 4; bot < Teams.PlaneCount; bot++)
+        {
+            var rig = new Rig();
+            rig.Set(FakeFlight.Plane(bot, new Vector3(0f, 600f, 0f), North));
+            var bot0 = rig.States[bot];
+            var moves = new System.Collections.Generic.HashSet<BotMode>();
+            for (int encounter = 0; encounter < 8; encounter++)
+            {
+                BotMode picked = BotMode.None;
+                for (int i = 0; i < 60 && picked == BotMode.None; i++)
+                {
+                    rig.States[bot] = bot0;
+                    Stick(rig, 1, bot, 150f, 20f);
+                    rig.Step();
+                    if (IsEvasion(rig.Module.Pilot(bot).Mode))
+                        picked = rig.Module.Pilot(bot).Mode;
+                }
+                Assert.NotEqual(BotMode.None, picked);
+                if (encounter == 0)
+                    firsts.Add(picked);
+                moves.Add(picked);
+                kinds.Add(picked);
+                rig.Set(FakeFlight.Plane(1, new Vector3(0f, 600f, -1500f), North)); // gone: shaken off, then the cooldown
+                for (int i = 0; i < 60 * 4; i++)
+                {
+                    rig.States[bot] = bot0;
+                    rig.Step();
+                }
+                Assert.False(IsEvasion(rig.Module.Pilot(bot).Mode));
+            }
+            Assert.Equal(8, rig.Module.Pilot(bot).Encounters);
+            Assert.True(moves.Count >= 2, $"bot {bot} always picks {Names(moves)}");
+        }
+        Assert.True(kinds.Count >= 3, $"only {kinds.Count} kinds of moves");
+        Assert.True(firsts.Count >= 2, "every bot opens with the same move");
+
+        static string Names(System.Collections.Generic.HashSet<BotMode> m) => string.Join(",", m);
+    }
+
+    [Fact]
+    public void DivesWhenSlowOrHigh()
+    {
+        // Slow (35 m/s) at 600 m, or high (900 m) at 50 m/s: every bot evades by diving.
+        foreach ((float alt, float speed) in new[] { (600f, 35f), (900f, 50f), (950f, 35f) })
+        {
+            for (int bot = 4; bot < Teams.PlaneCount; bot++)
+            {
+                var rig = new Rig();
+                rig.Set(FakeFlight.Plane(bot, new Vector3(0f, alt, 0f), North, speed: speed), flown: true);
+                float lowestNose = 0f;
+                for (int i = 0; i < 60 * 3; i++)
+                {
+                    Stick(rig, 1, bot);
+                    rig.Step();
+                    BotMode mode = rig.Module.Pilot(bot).Mode;
+                    if (IsEvasion(mode))
+                        Assert.NotEqual(BotMode.Break, mode);
+                    lowestNose = MathF.Min(lowestNose, Elevation(rig.States[bot]));
+                }
+                Assert.True(lowestNose < -20f * Deg, $"bot {bot} at {alt} m, {speed} m/s: nose down to {lowestNose / Deg} deg only");
+                Assert.True(rig.States[bot].Position.Y < alt - 30f, $"bot {bot} at {alt} m, {speed} m/s: now {rig.States[bot].Position.Y} m");
+            }
+        }
+
+        // Slow and low (200 m): no room to dive, so a break, but never climbing.
+        for (int bot = 4; bot < Teams.PlaneCount; bot++)
+        {
+            var rig = new Rig();
+            rig.Set(FakeFlight.Plane(bot, new Vector3(0f, 200f, 0f), North, speed: 35f), flown: true);
+            for (int i = 0; i < 60 * 3; i++)
+            {
+                Stick(rig, 1, bot);
+                rig.Step();
+                if (rig.States[bot].Speed < BotPilot.MinClimbSpeed - 1f)
+                    Assert.True(rig.States[bot].Velocity.Y < 2f, $"bot {bot} climbs at {rig.States[bot].Speed} m/s");
+            }
+            Assert.Equal(BotMode.Break, rig.Module.Pilot(bot).Mode);
+        }
+    }
+
+    [Fact]
+    public void AChasedBotNeverKeepsClimbingAndStaysSafe()
+    {
+        // A pursuer glued to the tail (it can't be shaken off) for 40 s, from mid altitude,
+        // high, near the ceiling, low, and slow: the bot never spirals upward, never climbs
+        // while slow, stays above 80 m and inside the area. Each bot, from either side.
+        foreach ((float alt, float speed) in new[] { (400f, 50f), (900f, 45f), (990f, 30f), (150f, 42f), (100f, 30f), (500f, 32f) })
+        {
+            for (int bot = 1; bot < Teams.PlaneCount; bot++)
+            {
+                int enemy = Teams.IsAllies(bot) ? 5 : 1;
+                var rig = new Rig();
+                rig.Set(FakeFlight.Plane(bot, new Vector3(300f, alt, 800f), North, speed: speed), flown: true);
+                float climbing = 0f, longestClimb = 0f, slowClimbing = 0f, longestSlowClimb = 0f;
+                int evading = 0;
+                for (int i = 0; i < 60 * 40; i++)
+                {
+                    Stick(rig, enemy, bot, 150f, bot % 2 == 0 ? 30f : -30f);
+                    rig.Step();
+                    PlaneState s = rig.States[bot];
+                    climbing = s.Velocity.Y > 1f ? climbing + Dt : 0f;
+                    longestClimb = MathF.Max(longestClimb, climbing);
+                    slowClimbing = s.Velocity.Y > 1f && s.Speed < BotPilot.MinClimbSpeed ? slowClimbing + Dt : 0f;
+                    longestSlowClimb = MathF.Max(longestSlowClimb, slowClimbing);
+                    if (IsEvasion(rig.Module.Pilot(bot).Mode))
+                        evading++;
+                    string at = $"bot {bot} from {alt} m, {speed} m/s, at {i * Dt:0.0} s";
+                    Assert.True(s.Position.Y > BotPilot.MinAltitude, $"{at}: down to {s.Position.Y} m");
+                    Assert.True(MathF.Abs(s.Position.X) < 2000f && MathF.Abs(s.Position.Z) < 2000f, $"{at}: left the area at {s.Position}");
+                }
+                string what = $"bot {bot} from {alt} m, {speed} m/s";
+                Assert.True(longestClimb < 4f, $"{what}: climbed {longestClimb} s on end");
+                Assert.True(longestSlowClimb < 0.75f, $"{what}: climbed {longestSlowClimb} s on end below {BotPilot.MinClimbSpeed} m/s");
+                Assert.True(evading > 60 * 5, $"{what}: evaded only {evading} steps");
+            }
+        }
+    }
+
+    [Fact]
+    public void EvasionIsTimeLimitedThenItAttacks()
+    {
+        // Glued pursuer: each evasion ends within its time limit, then the bot attacks (the
+        // pursuer) for the cooldown before it evades again.
+        var rig = new Rig();
+        rig.Set(FakeFlight.Plane(4, new Vector3(0f, 400f, 0f), North), flown: true);
+        float evadeFor = 0f, longest = 0f;
+        int returns = 0;
+        BotMode last = BotMode.None;
+        for (int i = 0; i < 60 * 30; i++)
+        {
+            Stick(rig, 1, 4);
+            rig.Step();
+            BotMode mode = rig.Module.Pilot(4).Mode;
+            evadeFor = IsEvasion(mode) ? evadeFor + Dt : 0f;
+            longest = MathF.Max(longest, evadeFor);
+            if (IsEvasion(last) && mode == BotMode.Attack)
+            {
+                returns++;
+                Assert.Equal(1, rig.Module.Pilot(4).TargetId);
+            }
+            if (mode is BotMode.Attack or BotMode.Circle)
+                Assert.Equal(-1, rig.Module.Pilot(4).ChaserId);
+            last = mode;
+        }
+        Assert.True(longest <= BotPilot.EvadeTime + BotPilot.EvadeTimeSpread + 0.1f, $"evaded {longest} s on end");
+        Assert.True(returns >= 3, $"went back to attacking {returns} times in 30 s");
+
+        // Shaken off (the pursuer is suddenly far away): back to attacking soon.
+        var shaken = new Rig();
+        shaken.Set(FakeFlight.Plane(4, new Vector3(0f, 400f, 0f), North), flown: true);
+        for (int i = 0; i < 40; i++)
+        {
+            Stick(shaken, 1, 4);
+            shaken.Step();
+        }
+        Assert.True(IsEvasion(shaken.Module.Pilot(4).Mode));
+        shaken.Set(FakeFlight.Plane(1, new Vector3(0f, 400f, -1200f), North));
+        for (int i = 0; i < 60 * (BotPilot.ShakenTime + 0.2f); i++)
+            shaken.Step();
+        Assert.Equal(BotMode.Attack, shaken.Module.Pilot(4).Mode);
+        Assert.Equal(1, shaken.Module.Pilot(4).TargetId);
+    }
+
+    [Fact]
+    public void TurnsOnAPursuerThatOvershoots()
+    {
+        // The bot (its stick ignored here: flies straight at 30 m/s) is chased by a faster
+        // plane that flies past it: once the pursuer is ahead it stops evading and attacks it,
+        // even with another enemy nearer.
+        var rig = new Rig();
+        rig.Set(FakeFlight.Plane(4, new Vector3(0f, 400f, 0f), North, speed: 30f));
+        rig.Set(FakeFlight.Plane(1, new Vector3(15f, 405f, 90f), North, speed: 60f));
+        bool evaded = false;
+        int overshot = -1;
+        for (int i = 0; i < 60 * 6; i++)
+        {
+            if (i == 60 * 2) // an enemy 50 m off its left wing, flying along: nearer than the overshooter later
+                rig.Set(FakeFlight.Plane(2, rig.States[4].Position + new Vector3(-50f, 0f, 0f), North, speed: 30f));
+            rig.Step();
+            BotPilot pilot = rig.Module.Pilot(4);
+            evaded |= IsEvasion(pilot.Mode);
+            if (overshot < 0 && Vector3.Dot(rig.States[1].Position - rig.States[4].Position, North) > 0f)
+                overshot = i;
+            if (overshot >= 0 && i > overshot + 60)
+            {
+                Assert.Equal(BotMode.Attack, pilot.Mode);
+                Assert.Equal(1, pilot.TargetId);
+            }
+        }
+        Assert.True(evaded, "never evaded");
+        Assert.True(overshot > 0 && overshot < 60 * 4, $"overshoot at step {overshot}");
+    }
+
+    [Fact]
+    public void JinksWhileShotAt()
+    {
+        // Pursuer 150 m behind, nose right on the bot: during the evasion (other than a split-S)
+        // the stick gets short random pitch and roll changes.
+        int jinkers = 0;
+        for (int bot = 4; bot < Teams.PlaneCount; bot++)
+        {
+            var rig = new Rig();
+            rig.Set(FakeFlight.Plane(bot, new Vector3(0f, 400f, 0f), North));
+            rig.Set(FakeFlight.Plane(1, new Vector3(0f, 400f, 150f), North));
+            var sticks = new System.Collections.Generic.HashSet<(float, float)>();
+            for (int i = 0; i < 90; i++)
+            {
+                rig.Step();
+                if (rig.Module.Pilot(bot).Jinking)
+                    sticks.Add((MathF.Round(rig.Input(bot).Pitch, 2), MathF.Round(rig.Input(bot).Roll, 2)));
+            }
+            if (rig.Module.Pilot(bot).Mode == BotMode.SplitS)
+                continue;
+            jinkers++;
+            Assert.True(sticks.Count >= 3, $"bot {bot} jinks with {sticks.Count} stick positions");
+        }
+        Assert.True(jinkers >= 2);
+    }
+
+    [Fact]
+    public void ChasedFlightIsDeterministic()
+    {
+        Rig Run()
+        {
+            var rig = new Rig();
+            rig.Set(FakeFlight.Plane(5, new Vector3(0f, 600f, 0f), North), flown: true);
+            return rig;
+        }
+        var a = Run();
+        var b = Run();
+        for (int i = 0; i < 60 * 20; i++)
+        {
+            Stick(a, 2, 5);
+            Stick(b, 2, 5);
+            a.Step();
+            b.Step();
+            Assert.Equal(a.Input(5).Pitch, b.Input(5).Pitch);
+            Assert.Equal(a.Input(5).Roll, b.Input(5).Roll);
+            Assert.Equal(a.Input(5).Throttle, b.Input(5).Throttle);
+            Assert.Equal(a.Module.Pilot(5).Mode, b.Module.Pilot(5).Mode);
+            Assert.Equal(a.States[5].Position, b.States[5].Position);
+        }
+    }
+
+    [Fact]
+    public void DoesNotEvadeAnEnemyFarBehindOrFlyingAway()
     {
         var far = new Rig();
         far.Set(FakeFlight.Plane(4, new Vector3(0f, 400f, 0f), North));
@@ -279,8 +586,8 @@ public class BotsModuleTests
         {
             far.Step();
             away.Step();
-            Assert.NotEqual(BotMode.Break, far.Module.Pilot(4).Mode);
-            Assert.NotEqual(BotMode.Break, away.Module.Pilot(4).Mode);
+            Assert.False(IsEvasion(far.Module.Pilot(4).Mode));
+            Assert.False(IsEvasion(away.Module.Pilot(4).Mode));
         }
     }
 
