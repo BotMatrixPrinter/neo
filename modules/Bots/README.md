@@ -13,7 +13,7 @@ the same rules. Simple and fun rather than perfect; easy difficulty for now.
 - **Core** (`Core/`): `BotsModule` (the `IModule`) owns one `BotPilot` per bot
   (`Pilot(id)`). Each tick, for each bot whose plane has been seen and is `Alive`, in id
   order, it publishes one `ControlInput` for that `PlaneId` (`HasAim` false). A downed or
-  never-seen bot gets no input and its pilot forgets its target and evasion. No allocations
+  never-seen bot gets no input and its pilot forgets its target, evasion and collision dodge. No allocations
   per tick; deterministic (same states, same inputs: no random numbers; each bot's
   "personality" and every "random" choice, such as its evasion moves and jinks, comes from a
   fixed hash of its id and a counter).
@@ -32,12 +32,29 @@ In priority order, each step:
    whose terrain is lower, kept until clear). Near the edge and heading out (see Edge) it
    climbs turning back toward the center instead, so the mountain walls beyond the edge
    (part of `Terrain.HeightAt`, like any mountain) are never flown into.
-2. **Edge**: the area is the square |x|, |z| <= `WorldBounds.HalfSize` (World Contract:
+2. **Collision** (`BotMode.Avoid`, since 2026-10-24: bots rammed each other nose to nose):
+   each step it predicts every other alive plane's closest approach (straight-line relative
+   motion, any team, the player's plane too) over the next 2.5 s (`AvoidLookahead`). One that
+   would pass within 25 m (`AvoidMiss`) is dodged once its contact (closer than 7 m,
+   `ContactDistance`: two 3.5 m spheres; or its closest approach, if they would not touch) is
+   within the bot's avoid reaction, 0.9 ± 0.3 s per bot (`AvoidReactionTime`, 0.6..1.2 s;
+   easy bots, so some still clip each other). The dodge overrides Edge, Evade and Attack
+   (`AvoidId` is the plane): full throttle, never fires, full pull with the lift rolled away
+   from the other plane's predicted position plus 10 m to its own right (`AvoidRightBias`), so
+   a head-on (or any near-exact collision course) is broken to the right by both planes and
+   they never dodge into each other; a crossing is passed behind, or under when it is above.
+   A way out below the wings is flown by pushing (bank at most 50 degrees, `AvoidPushBank`),
+   and so is one needing 30 degrees less roll that way (`AvoidPushPreference`). Terrain first:
+   Ground still comes before it, and when low (a dive's floor, see Evade) it never dodges
+   downward nor pushes. It ends once the planes separate, the predicted miss passes 50 m
+   (`AvoidClearMiss`), or after 3 s (`AvoidMaxTime`); then the bot goes back to what it was doing
+   (an evasion's clocks keep running meanwhile). A sooner threat takes over.
+3. **Edge**: the area is the square |x|, |z| <= `WorldBounds.HalfSize` (World Contract:
    4 km with 2000 today, 2 km × 2 km with 1000 once job 712 lands; every distance here
    follows it at run time). Within
    `EdgeMargin` (0.3 of the half size: 300 m of 1000) of an edge and heading out, turn back
    toward the center (easing toward 400 m altitude), well before the walls.
-3. **Evade**: an enemy within 350 m, in the 60 degree rear cone and pointing its nose at
+4. **Evade**: an enemy within 350 m, in the 60 degree rear cone and pointing its nose at
    the bot (within 45 degrees), for longer than the bot's evasion reaction (its reaction time
    × 1.25 with `EvasionSkill` 0.75) starts an evasion (full throttle, no fire). Its evasive
    stick inputs are softened by `EvasionSkill` (see the table). Each evasion picks one move, from a fixed hash of the bot and
@@ -68,7 +85,7 @@ In priority order, each step:
    wing line within 500 m, for the reaction time). After an overshoot the bot turns on it:
    it attacks the overshooter for 3 s even if another enemy is nearer. After any evasion it
    attacks for at least 2 s × 1.25 before it evades again. `ChaserId` is the pursuer while evading.
-4. **Attack**: the nearest alive plane of the other team. The aim point is the lead point
+5. **Attack**: the nearest alive plane of the other team. The aim point is the lead point
    (where the target will be when bullets arrive, at 450 m/s plus the bot's own speed),
    plus a slowly wandering aim error, seen with a lag (the reaction time). Far off the
    nose the bot banks toward the aim point's side (at most 80 degrees, `MaxBank`) and pulls,
@@ -80,7 +97,7 @@ In priority order, each step:
    attack throttle, 0.6 when within 150 m behind the target (not to overshoot). With
    `AimSkill` 0.75 the aim error is 1 / 0.75 (a third) larger and the lead's time of flight
    wanders by up to ±15%, so about a quarter fewer bullets land; firing rules unchanged.
-5. **Circle**: no enemy alive: circle the center (`CircleRadius`: 0.35 of the half size,
+6. **Circle**: no enemy alive: circle the center (`CircleRadius`: 0.35 of the half size,
    350 m of 1000) at 400 m altitude, throttle 0.6.
 
 **No slow climbs** (every step but Ground): the steepest climb allowed is 2 degrees per m/s
@@ -90,7 +107,7 @@ pushing, staying upright; only during an evasion is it banked past 90 degrees so
 brings it down. A target far behind is turned toward in a
 level turn, not by a loop.
 
-**Upright by default** (Ground, Edge, Attack, Circle steer this way): far off the nose it
+**Upright by default** (Ground, Edge, Attack, Circle steer this way; a collision dodge pulls or pushes, never inverted): far off the nose it
 banks toward the target's side, at most 80 degrees (`MaxBank`), and pulls or pushes by the
 nose motion it wants (toward the target's elevation through cos bank, toward its heading
 through sin bank; the rudder does the rest). A target below the wing line is mirrored above
@@ -123,6 +140,12 @@ stays inverted; so after such a move it is upright again within a couple of seco
 | `ShakeRange`, `ShakenTime` | 450 m, 1 s | pursuer shaken off |
 | `OvershootRange`, `ReverseTime` | 500 m, 3 s | overshoot; how long it then attacks the overshooter |
 | `BreakShare` ± `BreakShareSpread` | 0.5 ± 0.15 | share of breaks at mid altitude and good speed, per bot |
+| `ContactDistance` | 7 m | planes touch (Collisions: two 3.5 m spheres) |
+| `AvoidLookahead`, `AvoidMiss` | 2.5 s, 25 m | collision threats: predicted closest approach within this time and distance |
+| `AvoidReaction` ± `AvoidReactionSpread` | 0.9 ± 0.3 s | dodge starts this long before contact, per bot (`AvoidReactionTime`) |
+| `AvoidRightBias` | 10 m | the way out is biased this much to the bot's right: head-ons broken to the right by both |
+| `AvoidPushPreference`, `AvoidPushBank` | 30 deg, 50 deg | push instead of pull when that needs this much less roll; steepest bank while pushing |
+| `AvoidClearMiss`, `AvoidMaxTime` | 50 m, 3 s | the threat is clear (or once the planes separate) |
 | `BreakBank`, `BreakElevation` | 80 deg, -3 deg | the break turn |
 | `MinClimbSpeed`, `SlowDiveAngle` | 40 m/s, 10 deg | no climbing below it; dive angle when slow |
 | `HighAltitude`, `SplitSAltitude`, `DiveRoomAltitude`, `DiveFloorMargin` | 800, 500, 280, 100 m | dive when high (from y = 0); room for a split-S/roll-away or an extension, and dives level off this far above `MinAltitude` (all above the terrain under it and ahead) |
@@ -165,7 +188,17 @@ while still 80 m above the ground and never gets within 40 m of it; flying level
 the highest rolling hill it keeps about 80 m (over 75) above it; chased toward each of those tops, every bot dives, its
 dives stay 130 m above the ground and it stays 80 m above it; turns back before the edge; low toward each edge (and the walls beyond), every bot turns back within 0.9 of the half size and stays 40 m above the terrain; circles near the center without a target, never banked past 100 degrees; a full
 90 s 4 v 4 stays 40 m above the terrain and inside the area and shoots; chasing a target ahead and below (four places), every bot gets its nose on it without ever banking past 100 degrees; left inverted (target ahead, ahead and below, to the side, none), every bot is upright within 2 s and stays so, ending in fine aim on the target; a split-S still rolls past 150 degrees and a roll-away past 100, and the bot is upright 2.5 s after; with `AimSkill` 0.75 each aim error is 1 / 0.75 as large and, flown behind targets at 150 to 280 m, it scores about a quarter fewer hits (0.62..0.88 of the full-skill ones); determinism; bots differ and
-leave formation; the host can create the module (parameterless constructor); no allocations
+leave formation; collision avoidance: each bot's avoid reaction is within 0.6..1.2 s and they
+vary; every Allies bot against every Central bot head-on at 60 m/s each, 400 m apart, with four
+small offsets (48 cases): both dodge (the first at its reaction time before contact), never fire
+while dodging, move off to their own right, more than 3/4 were on a collision course before
+the dodge and more than 3/4 miss (all do with `FakeFlight`), and after the pass both are back
+to their behaviour; each bot holding its course with the player or a wingman on an exact
+collision course (head-on, 45 and 90 degrees from the right, 90 from the left, a wingman from
+90 right and 60 left) dodges it, misses and attacks its target again; with the player
+head-on 12 m above, high up it pushes under, low (100 m over the highest ground on its path)
+it never dodges down (nose never 3 degrees below level, stays 90 m above the ground) and
+misses; no dodge for a plane passing 40 m wide or a wingman 20 m alongside; the host can create the module (parameterless constructor); no allocations
 per tick.
 
 Test it alone: `./test.sh Bots`.

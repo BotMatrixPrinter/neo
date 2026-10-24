@@ -27,6 +27,8 @@ public enum BotMode
     Edge,
     /// <summary>Too low: climbing.</summary>
     Ground,
+    /// <summary>About to collide with another plane (any team, the player's too): last-second dodge, no fire.</summary>
+    Avoid,
 }
 
 /// <summary>
@@ -149,6 +151,28 @@ public sealed class BotPilot
     public const float CloseThrottle = 0.6f;
     public const float CloseRange = 150f;
     public const float CircleThrottle = 0.6f;
+    /// <summary>Planes touch closer than this, m (Collisions: two spheres of 3.5 m).</summary>
+    public const float ContactDistance = 7f;
+    /// <summary>Collision avoidance: every other alive plane's closest approach is predicted (straight-line relative motion) this far ahead, s.</summary>
+    public const float AvoidLookahead = 2.5f;
+    /// <summary>A predicted closest approach nearer than this, m, is a threat to dodge.</summary>
+    public const float AvoidMiss = 25f;
+    /// <summary>The dodge starts this long before contact (before the closest approach for planes that would just miss), s (each bot ± <see cref="AvoidReactionSpread"/>: 0.6..1.2 s; easy bots, so some still clip).</summary>
+    public const float AvoidReaction = 0.9f;
+    public const float AvoidReactionSpread = 0.3f;
+    /// <summary>The threat is clear once the planes separate, its predicted miss is beyond this, m, or after <see cref="AvoidMaxTime"/> s.</summary>
+    public const float AvoidClearMiss = 2f * AvoidMiss;
+    public const float AvoidMaxTime = 3f;
+    /// <summary>
+    /// The dodge puts the lift away from the other plane's predicted position, plus this much, m,
+    /// to the bot's own right: a head-on (or any near-exact collision course) is broken to the
+    /// right by both planes, so they never dodge into each other.
+    /// </summary>
+    public const float AvoidRightBias = 10f;
+    /// <summary>The dodge pushes instead of pulling when that needs this much less roll (a way out below the wings is always pushed to).</summary>
+    public const float AvoidPushPreference = 30f * Deg;
+    /// <summary>Steepest bank while pushing in a dodge (a steeper one would turn the plane back toward the lift side).</summary>
+    public const float AvoidPushBank = 50f * Deg;
 
     private readonly int _id;
     private readonly bool _allies;
@@ -163,6 +187,7 @@ public sealed class BotPilot
     private readonly float _evadeReaction;
     private readonly float _evadeCooldown;
     private readonly float _aimSkill;
+    private readonly float _avoidReaction;
 
     private Vector3 _seenAim;
     private bool _hasSeenAim;
@@ -186,6 +211,10 @@ public sealed class BotPilot
     private float _jinkClock;
     private int _jinkCount;
     private float _jinkPitch, _jinkRoll;
+
+    // Collision avoidance: the plane it dodges (-1: none), and for how long.
+    private int _avoid = -1;
+    private float _avoidTime;
 
     // Terrain: the highest ground under it and ahead (this step), the side it turns away to.
     private float _groundAhead;
@@ -211,6 +240,7 @@ public sealed class BotPilot
         _evadeCooldown = EvadeCooldown * slower;
         _evadeLimit = (EvadeTime + EvadeTimeSpread * Spread(planeId, 7)) * evasionSkill;
         _breakShare = BreakShare + BreakShareSpread * Spread(planeId, 8);
+        _avoidReaction = AvoidReaction + AvoidReactionSpread * Spread(planeId, 9);
     }
 
     public int PlaneId => _id;
@@ -220,6 +250,12 @@ public sealed class BotPilot
 
     /// <summary>How long a chaser must sit on its tail before it evades, s (its reaction, slower when <see cref="EvasionSkill"/> is below 1).</summary>
     public float EvadeReaction => _evadeReaction;
+
+    /// <summary>How long before contact this bot starts a collision dodge, s.</summary>
+    public float AvoidReactionTime => _avoidReaction;
+
+    /// <summary>The plane it is dodging (collision avoidance), or -1.</summary>
+    public int AvoidId => _avoid;
 
     /// <summary>This bot's longest evasion, s.</summary>
     public float EvadeLimit => _evadeLimit;
@@ -309,6 +345,8 @@ public sealed class BotPilot
             best = Vector3.Distance(states[target].Position, me.Position);
         }
 
+        UpdateAvoidance(states, known, in me, dt);
+
         TargetId = target;
         Jinking = false;
         float pitch, roll, yaw;
@@ -320,6 +358,12 @@ public sealed class BotPilot
         {
             Mode = BotMode.Ground;
             Steer(climb, in me, false, out pitch, out roll, out yaw);
+        }
+        else if (_avoid >= 0)
+        {
+            Mode = BotMode.Avoid;
+            throttle = 1f;
+            Dodge(in states[_avoid], in me, forward, out pitch, out roll, out yaw);
         }
         else if (turnBack)
         {
@@ -410,9 +454,98 @@ public sealed class BotPilot
         _reverseTarget = -1;
         _reverseTime = 0f;
         _terrainSide = 0f;
+        _avoid = -1;
+        _avoidTime = 0f;
         Jinking = false;
         Mode = BotMode.None;
         TargetId = -1;
+    }
+
+    /// <summary>
+    /// Collision avoidance: keeps dodging its threat until it is clear (the planes separate, the
+    /// predicted miss grows past <see cref="AvoidClearMiss"/>, or <see cref="AvoidMaxTime"/>);
+    /// a threat whose contact is sooner, or the first one, takes over once its contact (or closest
+    /// approach, if they would not touch) is within this bot's reaction (<see cref="AvoidReactionTime"/>) and nearer than <see cref="AvoidMiss"/>.
+    /// </summary>
+    private void UpdateAvoidance(PlaneState[] states, bool[] known, in PlaneState me, float dt)
+    {
+        float soonest = float.MaxValue;
+        if (_avoid >= 0)
+        {
+            _avoidTime += dt;
+            if (!known[_avoid] || !states[_avoid].Alive || _avoidTime >= AvoidMaxTime
+                || !ClosestApproach(in states[_avoid], in me, out _, out float miss, out soonest) || miss > AvoidClearMiss)
+            {
+                _avoid = -1;
+                soonest = float.MaxValue;
+            }
+        }
+        for (int i = 0; i < states.Length; i++)
+        {
+            if (i == _id || i == _avoid || !known[i] || !states[i].Alive)
+                continue;
+            if (ClosestApproach(in states[i], in me, out _, out float miss, out float contact)
+                && miss < AvoidMiss && contact <= _avoidReaction && contact < soonest)
+            {
+                soonest = contact;
+                _avoid = i;
+                _avoidTime = 0f;
+            }
+        }
+    }
+
+    /// <summary>
+    /// When (<paramref name="time"/>, s from now) and how near (<paramref name="miss"/>, m)
+    /// <paramref name="other"/> passes, on straight-line relative motion; false when the planes
+    /// are separating or the closest approach is more than <see cref="AvoidLookahead"/> away.
+    /// <paramref name="contact"/>: when they would touch (closer than <see cref="ContactDistance"/>),
+    /// or <paramref name="time"/> if they would not.
+    /// </summary>
+    private static bool ClosestApproach(in PlaneState other, in PlaneState me, out float time, out float miss, out float contact)
+    {
+        Vector3 rel = other.Position - me.Position;
+        Vector3 closing = other.Velocity - me.Velocity;
+        float vv = closing.LengthSquared();
+        time = vv > 1e-4f ? -Vector3.Dot(rel, closing) / vv : 0f;
+        miss = (rel + closing * time).Length();
+        contact = miss < ContactDistance ? time - MathF.Sqrt((ContactDistance * ContactDistance - miss * miss) / MathF.Max(vv, 1e-4f)) : time;
+        return time > 0f && time <= AvoidLookahead;
+    }
+
+    /// <summary>
+    /// The dodge: roll the lift away from where <paramref name="other"/> will be at the closest
+    /// approach (biased to the bot's own right by <see cref="AvoidRightBias"/>, so a head-on is
+    /// broken to the right by both) and pull; a way out below the wings is flown by pushing,
+    /// never inverted, and never downward when low over the terrain.
+    /// </summary>
+    private void Dodge(in PlaneState other, in PlaneState me, Vector3 forward, out float pitch, out float roll, out float yaw)
+    {
+        ClosestApproach(in other, in me, out float t, out _, out _);
+        Vector3 miss = other.Position - me.Position + (other.Velocity - me.Velocity) * t;
+        Vector3 right = Vector3.Cross(forward, Vector3.UnitY);
+        right = right.LengthSquared() > 1e-4f ? Vector3.Normalize(right) : Vector3.Transform(Vector3.UnitX, me.Orientation);
+        Vector3 up = Vector3.Cross(right, forward);
+        Vector3 escape = -(miss - forward * Vector3.Dot(miss, forward)) + right * AvoidRightBias;
+        bool low = LowDive(in me);
+        if (low)
+            escape.Y = MathF.Max(escape.Y, 0f); // terrain first: never dodge downward (nor push) when low
+        float side = Vector3.Dot(escape, right), lift = Vector3.Dot(escape, up);
+        float wanted = MathF.Abs(side) + MathF.Abs(lift) > 1e-3f ? MathF.Atan2(side, lift) : 90f * Deg;
+        // Pull with the lift on the way out, or push with it opposite (never inverted, never when
+        // low): a way out below the wings is pushed to, and so is one that needs much less roll that way.
+        float bank = Bank(me.Orientation);
+        float pull = Math.Clamp(wanted, -MaxBank, MaxBank);
+        float push = Math.Clamp(wanted - MathF.Sign(wanted) * MathF.PI, -AvoidPushBank, AvoidPushBank);
+        bool pushing = !low && (MathF.Abs(wanted) > 100f * Deg
+            || MathF.Abs(WrapAngle(push - bank)) < MathF.Abs(WrapAngle(pull - bank)) - AvoidPushPreference);
+        float sense = pushing ? -1f : 1f;
+        float error = WrapAngle((pushing ? push : pull) - bank);
+        roll = Math.Clamp(error * 3f, -1f, 1f);
+        // Full pull at once (every way off the threat's line helps; both planes of a head-on lifting
+        // alike cancels out, their breaks to the right add up), softer only while the lift still
+        // points more than 90 degrees from the way out.
+        pitch = sense * Math.Clamp(2.5f - MathF.Abs(error) / (60f * Deg), 0.3f, 1f);
+        yaw = 0f;
     }
 
     /// <summary>Starts an evasion of <paramref name="chaser"/>: picks the move for this bot and encounter.</summary>

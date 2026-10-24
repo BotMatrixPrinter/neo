@@ -1178,6 +1178,211 @@ public class BotsModuleTests
         }
     }
 
+    /// <summary>
+    /// Straight-line closest approach of <paramref name="b"/> to <paramref name="a"/>: when (s from
+    /// now), how near (m), and when they would touch (s; the closest approach if they would not).
+    /// </summary>
+    private static (float Time, float Miss, float Contact) Approach(in PlaneState a, in PlaneState b)
+    {
+        Vector3 rel = b.Position - a.Position, closing = b.Velocity - a.Velocity;
+        float vv = MathF.Max(closing.LengthSquared(), 1e-4f);
+        float t = MathF.Max(0f, -Vector3.Dot(rel, closing) / vv);
+        float miss = (rel + closing * t).Length(), r = BotPilot.ContactDistance;
+        return (t, miss, miss < r ? t - MathF.Sqrt((r * r - miss * miss) / vv) : t);
+    }
+
+    [Fact]
+    public void EachBotDodgesBetweenAboutAHalfAndASecondBeforeContact()
+    {
+        var module = new BotsModule();
+        for (int id = 1; id < Teams.PlaneCount; id++)
+            Assert.InRange(module.Pilot(id).AvoidReactionTime, 0.6f, 1.2f);
+        int distinct = 0;
+        for (int id = 2; id < Teams.PlaneCount; id++)
+            distinct += module.Pilot(id).AvoidReactionTime != module.Pilot(1).AvoidReactionTime ? 1 : 0;
+        Assert.True(distinct >= 5, "reactions do not vary per bot");
+    }
+
+    [Fact]
+    public void HeadOnBotsBothBreakRightAndMissMostOfTheTime()
+    {
+        // Every Allies bot against every Central bot, nose to nose 400 m apart at full speed
+        // (60 m/s each), a little offset (seeds): attacking each other they would ram. Each must
+        // dodge (never firing then), rolling to its own right, at its own reaction time; most
+        // pairs miss; after the pass both go back to fighting.
+        int cases = 0, misses = 0, rammed = 0;
+        foreach ((float dx, float dy) in new[] { (0f, 0f), (1.5f, 0f), (-2f, 1f), (0.5f, -2f) })
+        {
+            for (int a = 1; a <= 3; a++)
+            {
+                for (int b = 4; b < Teams.PlaneCount; b++)
+                {
+                    var rig = new Rig();
+                    rig.Set(FakeFlight.Plane(a, new Vector3(0f, 500f, 0.2f * H), North, speed: 60f), flown: true);
+                    rig.Set(FakeFlight.Plane(b, new Vector3(dx, 500f + dy, 0.2f * H - 400f), -North, speed: 60f), flown: true);
+                    var started = new System.Collections.Generic.Dictionary<int, int>();
+                    var course = new System.Collections.Generic.Dictionary<int, Vector3>();
+                    float closest = float.MaxValue, before = float.MaxValue;
+                    int passed = -1;
+                    for (int i = 0; i < 60 * 8; i++)
+                    {
+                        PlaneState sa = rig.States[a], sb = rig.States[b];
+                        rig.Step();
+                        foreach (int id in new[] { a, b })
+                        {
+                            BotPilot p = rig.Module.Pilot(id);
+                            if (p.Mode != BotMode.Avoid)
+                                continue;
+                            Assert.False(rig.Input(id).Fire, $"bot {id} fires while dodging");
+                            Assert.Equal(id == a ? b : a, p.AvoidId);
+                            if (!started.ContainsKey(id))
+                            {
+                                started[id] = i;
+                                course[id] = Vector3.Normalize(id == a ? sa.Velocity : sb.Velocity);
+                                // The first starts at its reaction time before contact (give or take a step and the
+                                // aim wobble); the other no earlier than its own (the first's dodge already widens the miss).
+                                float t = Approach(sa, sb).Contact;
+                                Assert.InRange(t, started.Count == 1 ? p.AvoidReactionTime - 0.1f : 0f, p.AvoidReactionTime + 0.05f);
+                                if (started.Count == 1)
+                                    before = Approach(sa, sb).Miss;
+                            }
+                            else if (i == started[id] + 30)
+                            {
+                                // Half a second in: moving off to its own right (of its course when it started).
+                                Vector3 right = Vector3.Cross(course[id], Vector3.UnitY);
+                                Assert.True(Vector3.Dot(rig.States[id].Velocity, right) > 8f, $"bot {id} ({dx}, {dy}) moves {Vector3.Dot(rig.States[id].Velocity, right)} m/s to its right");
+                            }
+                        }
+                        float d = Vector3.Distance(rig.States[a].Position, rig.States[b].Position);
+                        closest = MathF.Min(closest, d);
+                        if (passed < 0 && Vector3.Dot(rig.States[b].Position - rig.States[a].Position, Nose(rig.States[a])) < 0f)
+                            passed = i;
+                    }
+                    Assert.True(started.ContainsKey(a) && started.ContainsKey(b), $"bots {a}, {b} ({dx}, {dy}): not both dodged");
+                    Assert.True(passed > 0, "never passed");
+                    foreach (int id in new[] { a, b })
+                        Assert.NotEqual(BotMode.Avoid, rig.Module.Pilot(id).Mode); // threat gone: back to its behaviour
+                    cases++;
+                    if (before < BotPilot.ContactDistance)
+                        rammed++;
+                    if (closest > BotPilot.ContactDistance)
+                        misses++;
+                }
+            }
+        }
+        Assert.True(rammed > cases * 3 / 4, $"only {rammed} of {cases} on a collision course before the dodge");
+        Assert.True(misses > cases * 3 / 4, $"only {misses} of {cases} missed");
+    }
+
+    /// <summary>
+    /// Flies bot <paramref name="bot"/> (attacking an enemy far ahead, so it holds its course)
+    /// with plane <paramref name="obstacle"/> kept on an exact collision course with it
+    /// (coming from <paramref name="angle"/> off its nose, positive to the right, 0 head-on; <paramref name="above"/> m
+    /// above, meeting <see cref="AvoidLookahead"/> s ahead) until it dodges, then flying straight. Returns
+    /// the nearest the two came, the bot's first dodge stick and its lowest clearance and elevation while dodging.
+    /// </summary>
+    private static (float Closest, ControlInput First, float Lowest, float LowestElevation, Rig Rig) Crossing(
+        int bot, int obstacle, float angle, Vector3 start, float above = 0f)
+    {
+        var rig = new Rig();
+        int enemy = Teams.IsAllies(bot) ? 5 : 1;
+        if (enemy == obstacle)
+            enemy = Teams.IsAllies(bot) ? 6 : 2;
+        rig.Set(FakeFlight.Plane(bot, start, North), flown: true);
+        rig.Set(FakeFlight.Plane(enemy, start + North * 0.5f * H, North, speed: 60f));
+        float closest = float.MaxValue, lowest = float.MaxValue, lowestElevation = float.MaxValue;
+        ControlInput first = default;
+        bool dodging = false;
+        for (int i = 0; i < 60 * 6; i++)
+        {
+            if (!dodging)
+            {
+                PlaneState s = rig.States[bot];
+                Vector3 heading = Vector3.Normalize(new Vector3(s.Velocity.X, 0f, s.Velocity.Z));
+                Vector3 course = Vector3.Transform(heading, Quaternion.CreateFromAxisAngle(Vector3.UnitY, -angle));
+                float t = MathF.Max(0.05f, 2.5f - i * Dt);
+                Vector3 meet = s.Position + s.Velocity * t + Vector3.UnitY * above;
+                rig.Set(FakeFlight.Plane(obstacle, meet + course * 50f * t, -course, speed: 50f));
+            }
+            rig.Step();
+            BotPilot p = rig.Module.Pilot(bot);
+            if (p.Mode == BotMode.Avoid)
+            {
+                if (!dodging)
+                    first = rig.Input(bot);
+                dodging = true;
+                Assert.Equal(obstacle, p.AvoidId);
+                Assert.False(rig.Input(bot).Fire);
+                lowest = MathF.Min(lowest, Clearance(rig.States[bot]));
+                lowestElevation = MathF.Min(lowestElevation, Elevation(rig.States[bot]));
+            }
+            closest = MathF.Min(closest, Vector3.Distance(rig.States[bot].Position, rig.States[obstacle].Position));
+        }
+        Assert.True(dodging, $"bot {bot} never dodged plane {obstacle} from {angle / Deg} deg");
+        return (closest, first, lowest, lowestElevation, rig);
+    }
+
+    [Theory]
+    [InlineData(0, 90f)]
+    [InlineData(0, -90f)]
+    [InlineData(0, 45f)]
+    [InlineData(0, 0f)]
+    [InlineData(-1, 90f)]
+    [InlineData(-1, -60f)]
+    public void DodgesACrossingPlaneOfEitherTeamOrThePlayerThenGoesBackToItsTarget(int obstacle, float angle)
+    {
+        // Each bot holds its course (a target far ahead); plane obstacle (0: the player; -1: a
+        // wingman) comes in on an exact collision course: it dodges and misses; once past,
+        // it attacks its target again.
+        for (int bot = 1; bot < Teams.PlaneCount; bot++)
+        {
+            int other = obstacle >= 0 ? obstacle : bot == 1 ? 2 : bot == 4 ? 5 : bot - 1;
+            var (closest, _, _, _, rig) = Crossing(bot, other, angle * Deg, new Vector3(0f, 500f, 0.2f * H));
+            Assert.True(closest > BotPilot.ContactDistance, $"bot {bot} hit plane {other} ({closest} m) from {angle} deg");
+            Assert.Equal(BotMode.Attack, rig.Module.Pilot(bot).Mode);
+            Assert.Equal(-1, rig.Module.Pilot(bot).AvoidId);
+        }
+    }
+
+    [Fact]
+    public void ADodgeNeverDivesIntoTheTerrain()
+    {
+        // The player coming head-on 12 m above: high up, a bot dodges down (pushes); low
+        // (100 m above the highest ground along its path) it dodges level or up, never down, and
+        // stays well above the ground.
+        for (int bot = 1; bot < Teams.PlaneCount; bot++)
+        {
+            var high = Crossing(bot, 0, 0f, new Vector3(0f, 600f, 0.2f * H), above: 12f);
+            Assert.True(high.First.Pitch < 0f, $"bot {bot} high: pitch {high.First.Pitch}");
+
+            Vector3 start = new(0.1f * H, 0f, 0.2f * H);
+            float ground = 0f;
+            for (float d = 0f; d <= 600f; d += 10f)
+                ground = MathF.Max(ground, Terrain.HeightAt(start.X, start.Z - d));
+            start.Y = ground + 100f;
+            var low = Crossing(bot, 0, 0f, start, above: 12f);
+            Assert.True(low.First.Pitch > 0f, $"bot {bot} low: pitch {low.First.Pitch}");
+            Assert.True(low.LowestElevation > -3f * Deg, $"bot {bot} low: nose {low.LowestElevation / Deg} deg down while dodging");
+            Assert.True(low.Lowest > 90f, $"bot {bot} low: down to {low.Lowest} m above the ground while dodging");
+            Assert.True(low.Closest > BotPilot.ContactDistance, $"bot {bot} low: hit ({low.Closest} m)");
+        }
+    }
+
+    [Fact]
+    public void NoDodgeForPlanesThatPassWideOrFlyAlongside()
+    {
+        // Head-on but passing 40 m to the side, and a wingman 20 m alongside on the same course: no dodge.
+        var rig = new Rig();
+        rig.Set(FakeFlight.Plane(1, new Vector3(0f, 500f, 0.2f * H), North), flown: true);
+        rig.Set(FakeFlight.Plane(2, new Vector3(20f, 500f, 0.2f * H), North));
+        rig.Set(FakeFlight.Plane(3, new Vector3(-40f, 500f, 0.2f * H - 300f), -North));
+        for (int i = 0; i < 60 * 5; i++)
+        {
+            rig.Step();
+            Assert.NotEqual(BotMode.Avoid, rig.Module.Pilot(1).Mode);
+        }
+    }
+
     private static Rig Dogfight()
     {
         var rig = new Rig();
