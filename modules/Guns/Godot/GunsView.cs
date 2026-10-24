@@ -10,6 +10,8 @@ namespace Neo.Guns;
 /// Godot side of the Guns module: a glowing yellow-orange tracer streak for every third
 /// bullet of every plane (interpolated between fixed ticks), small muzzle flashes on each
 /// plane's volleys and a cartoon spark puff where a bullet hits (a smaller one on a plane).
+/// Tracers of boosted bullets (fired by a plane that popped a balloon) look hotter: a whiter,
+/// brighter core and a redder glow, slightly larger.
 /// No rules here. Opened on its own (no module bound, e.g. by screenshot.sh) it runs a
 /// preview: its own Core fed the player and a wingman firing at a balloon and an enemy plane,
 /// simple stand-in planes and balloon, and a chase camera.
@@ -21,9 +23,13 @@ public partial class GunsView : Node3D, IModuleView
     private const float SparkSeconds = 0.45f;
     private const int SparkBits = 6;
     private const float PlaneSparkScale = 0.45f;
+    private const float BoostedTracerWidth = 1.35f;
+    private const float BoostedTracerLength = 1.15f;
 
     private static readonly Color Tracer = new(1f, 0.92f, 0.35f);
     private static readonly Color TracerGlow = new(1f, 0.45f, 0.05f, 0.5f);
+    private static readonly Color HotTracer = new(1f, 0.98f, 0.8f);
+    private static readonly Color HotTracerGlow = new(1f, 0.3f, 0.08f, 0.62f);
     private static readonly Color Flash = new(1f, 0.93f, 0.55f);
     private static readonly Color Spark = new(1f, 0.85f, 0.3f);
     private static readonly Color Smoke = new(0.93f, 0.9f, 0.84f);
@@ -39,6 +45,9 @@ public partial class GunsView : Node3D, IModuleView
     private Camera3D? _previewCamera;
 
     private readonly MeshInstance3D[] _tracers = new MeshInstance3D[GunsModule.PoolSize];
+    private readonly MeshInstance3D[] _tracerHalos = new MeshInstance3D[GunsModule.PoolSize];
+    private readonly bool[] _tracerHot = new bool[GunsModule.PoolSize];
+    private StandardMaterial3D? _tracerCore, _tracerGlow, _hotTracerCore, _hotTracerGlow;
     private readonly MeshInstance3D[,] _flashes = new MeshInstance3D[GunsModule.Planes, GunsModule.Guns];
     private readonly Node3D[] _sparks = new Node3D[GunsModule.HitRing];
     private readonly MeshInstance3D[,] _sparkBits = new MeshInstance3D[GunsModule.HitRing, SparkBits];
@@ -58,24 +67,10 @@ public partial class GunsView : Node3D, IModuleView
         for (int p = 0; p < GunsModule.Planes; p++)
             _flashAge[p] = FlashSeconds;
 
-        var tracerCore = new StandardMaterial3D
-        {
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-            AlbedoColor = Tracer,
-            // Drawn after its see-through halo, so the hot core stays bright.
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            RenderPriority = 1,
-            EmissionEnabled = true,
-            Emission = Tracer,
-            EmissionEnergyMultiplier = 3f,
-        };
-        var tracerGlow = new StandardMaterial3D
-        {
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-            AlbedoColor = TracerGlow,
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
-        };
+        var tracerCore = _tracerCore = TracerCore(Tracer, 3f);
+        var tracerGlow = _tracerGlow = TracerGlowMaterial(TracerGlow);
+        _hotTracerCore = TracerCore(HotTracer, 5f);
+        _hotTracerGlow = TracerGlowMaterial(HotTracerGlow);
         var flash = new StandardMaterial3D
         {
             ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
@@ -105,7 +100,7 @@ public partial class GunsView : Node3D, IModuleView
         for (int i = 0; i < GunsModule.PoolSize; i++)
         {
             var tracer = Add(this, streak, tracerCore, null);
-            Add(tracer, halo, tracerGlow, null);
+            _tracerHalos[i] = Add(tracer, halo, tracerGlow, null);
             tracer.Visible = false;
             _tracers[i] = tracer;
         }
@@ -150,6 +145,9 @@ public partial class GunsView : Node3D, IModuleView
         _previewBus.Publish(new ControlInput(1, 0, 0, 0, 1f, true, false, System.Numerics.Vector3.Zero));
         _previewBus.Publish(new PlaneState(4, position + PreviewEnemy, System.Numerics.Quaternion.Identity, velocity, 55f, 1f));
         _previewBus.Publish(new TargetState(0, PreviewBalloon, 9f, 15, true));
+        // The player has just popped a balloon: its tracers look hotter than the wingman's.
+        if (_guns.StateOf(0).BoostSecondsLeft < 1f)
+            _previewBus.Publish(new TargetDestroyed(1, PreviewBalloon, 0));
         _guns.Tick(new TickContext((long)(_previewTime * 60 + 0.5), delta));
     }
 
@@ -182,7 +180,21 @@ public partial class GunsView : Node3D, IModuleView
             var dir = velocity / speed;
             // The tail does not reach back past the muzzle.
             float length = Mathf.Min(TracerLength, speed * ((float)b.Age + fraction / 60f) + 0.5f);
-            tracer.Transform = new Transform3D(Along(dir, length), head - dir * (length * 0.5f));
+            var basis = Along(dir, length);
+            if (b.Boosted)
+            {
+                length = Mathf.Min(TracerLength * BoostedTracerLength, length * BoostedTracerLength);
+                basis = Along(dir, length);
+                basis.X *= BoostedTracerWidth;
+                basis.Z *= BoostedTracerWidth;
+            }
+            if (_tracerHot[i] != b.Boosted)
+            {
+                _tracerHot[i] = b.Boosted;
+                tracer.MaterialOverride = b.Boosted ? _hotTracerCore : _tracerCore;
+                _tracerHalos[i].MaterialOverride = b.Boosted ? _hotTracerGlow : _tracerGlow;
+            }
+            tracer.Transform = new Transform3D(basis, head - dir * (length * 0.5f));
             tracer.Visible = true;
         }
 
@@ -274,6 +286,26 @@ public partial class GunsView : Node3D, IModuleView
         parent.AddChild(instance);
         return instance;
     }
+
+    private static StandardMaterial3D TracerCore(Color color, float energy) => new()
+    {
+        ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+        AlbedoColor = color,
+        // Drawn after its see-through halo, so the hot core stays bright.
+        Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+        RenderPriority = 1,
+        EmissionEnabled = true,
+        Emission = color,
+        EmissionEnergyMultiplier = energy,
+    };
+
+    private static StandardMaterial3D TracerGlowMaterial(Color color) => new()
+    {
+        ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+        AlbedoColor = color,
+        Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+        CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+    };
 
     private static StandardMaterial3D Toon(Color color) => new()
     {

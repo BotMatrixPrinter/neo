@@ -39,6 +39,7 @@ internal sealed class QuietBus : IMessageBus
     public IMessageHandler<Neo.Input.ControlInput>? Input;
     public IMessageHandler<Neo.Flight.PlaneState>? Plane;
     public IMessageHandler<Neo.Targets.TargetState>? Target;
+    public IMessageHandler<Neo.Targets.TargetDestroyed>? Destroyed;
     public int Damages;
     public int PlaneHits;
     public int States;
@@ -51,6 +52,8 @@ internal sealed class QuietBus : IMessageBus
             Plane = plane;
         if (handler is IMessageHandler<Neo.Targets.TargetState> target)
             Target = target;
+        if (handler is IMessageHandler<Neo.Targets.TargetDestroyed> destroyed)
+            Destroyed = destroyed;
     }
 
     public void Publish<T>(in T message) where T : struct

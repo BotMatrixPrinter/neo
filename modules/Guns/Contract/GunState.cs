@@ -4,12 +4,18 @@ namespace Neo.Guns;
 public readonly struct GunState
 {
     public GunState(int planeId, float heat, bool overheated, bool firing, int shotsFired)
+        : this(planeId, heat, overheated, firing, shotsFired, 0f)
+    {
+    }
+
+    public GunState(int planeId, float heat, bool overheated, bool firing, int shotsFired, float boostSecondsLeft)
     {
         PlaneId = planeId;
         Heat = heat;
         Overheated = overheated;
         Firing = firing;
         ShotsFired = shotsFired;
+        BoostSecondsLeft = boostSecondsLeft;
     }
 
     /// <summary>The plane, 0..7 (0 is the player); one GunState per plane every step.</summary>
@@ -26,4 +32,10 @@ public readonly struct GunState
 
     /// <summary>Rounds fired since start, both guns together.</summary>
     public int ShotsFired { get; }
+
+    /// <summary>
+    /// Seconds left of the +50% damage boost this plane got for popping a balloon (60 at the pop,
+    /// restarted by each new pop); 0 when not boosted (also from the 5-argument constructor).
+    /// </summary>
+    public float BoostSecondsLeft { get; }
 }

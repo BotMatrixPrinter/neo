@@ -14,9 +14,11 @@ namespace Neo.Guns;
 /// <see cref="RoundsPerSecond"/>; bullets fly straight from the muzzles at the plane's velocity
 /// plus <see cref="MuzzleSpeed"/> along the nose and live <see cref="BulletLifeSeconds"/>. A
 /// bullet that crosses an alive target's sphere is removed and publishes one
-/// <see cref="DamageTarget"/>(id, 1); one that crosses an alive enemy plane's sphere
+/// <see cref="DamageTarget"/>(id, 1, shooter); one that crosses an alive enemy plane's sphere
 /// (<see cref="PlaneRadius"/>) is removed and publishes one <see cref="PlaneHit"/> for the part
-/// hit. Publishes a <see cref="GunState"/> per plane every tick. Bullets live in a fixed pool;
+/// hit. A plane that pops a balloon (<see cref="TargetDestroyed.ShooterPlaneId"/>) is boosted
+/// for <see cref="BoostSeconds"/>: the bullets it fires meanwhile do <see cref="BoostFactor"/>x
+/// damage. Publishes a <see cref="GunState"/> per plane every tick. Bullets live in a fixed pool;
 /// allocation-free per tick.
 /// </summary>
 public sealed class GunsModule : IModule
@@ -55,6 +57,12 @@ public sealed class GunsModule : IModule
     /// <summary>Health one bullet takes from the part of a plane it hits.</summary>
     public const float BulletDamage = 0.04f;
 
+    /// <summary>Seconds a balloon pop boosts the popping plane's damage; a new pop restarts it (no stacking).</summary>
+    public const double BoostSeconds = 60;
+
+    /// <summary>Damage multiplier of a boosted plane's bullets (+50%).</summary>
+    public const float BoostFactor = 1.5f;
+
     /// <summary>Body-space |x| beyond which a hit is on a wing, meters.</summary>
     public const float WingX = 1f;
 
@@ -82,9 +90,12 @@ public sealed class GunsModule : IModule
     private readonly double[] _shotTimer = new double[Planes];
     private readonly GunState[] _states = new GunState[Planes];
     private readonly long[] _lastVolley = new long[Planes];
+    private readonly double[] _boost = new double[Planes];
+    private readonly float[] _balloonCarry = new float[Planes];
     private readonly InputHandler _inputHandler;
     private readonly PlaneHandler _planeHandler;
     private readonly TargetHandler _targetHandler;
+    private readonly DestroyedHandler _destroyedHandler;
     private IMessageBus? _bus;
 
     public GunsModule()
@@ -92,6 +103,7 @@ public sealed class GunsModule : IModule
         _inputHandler = new InputHandler(this);
         _planeHandler = new PlaneHandler(this);
         _targetHandler = new TargetHandler(this);
+        _destroyedHandler = new DestroyedHandler(this);
         for (int p = 0; p < Planes; p++)
             _states[p] = new GunState(p, 0f, false, false, 0);
     }
@@ -133,6 +145,9 @@ public sealed class GunsModule : IModule
     /// <summary>True when a <see cref="PlaneState"/> has been received for <paramref name="planeId"/>.</summary>
     public bool HasPlane(int planeId) => _hasPlane[planeId];
 
+    /// <summary>True while plane <paramref name="planeId"/>'s damage boost runs (its bullets fired now are boosted).</summary>
+    public bool Boosted(int planeId) => _boost[planeId] > Epsilon;
+
     /// <summary>The last <see cref="PlaneState"/> received for <paramref name="planeId"/>.</summary>
     public PlaneState Plane(int planeId) => _planes[planeId];
 
@@ -167,6 +182,7 @@ public sealed class GunsModule : IModule
         bus.Subscribe(_inputHandler);
         bus.Subscribe(_planeHandler);
         bus.Subscribe(_targetHandler);
+        bus.Subscribe(_destroyedHandler);
     }
 
     public void Tick(in TickContext tick)
@@ -185,13 +201,14 @@ public sealed class GunsModule : IModule
         bool firing = _inputs[p].Fire && _hasPlane[p] && _planes[p].Alive && !state.Overheated;
         bool overheated = state.Overheated;
         int shots = state.ShotsFired;
+        bool boosted = _boost[p] > Epsilon;
 
         if (firing)
         {
             while (_shotTimer[p] <= Epsilon)
             {
                 for (int gun = 0; gun < Guns; gun++)
-                    Spawn(p, gun, shots++);
+                    Spawn(p, gun, shots++, boosted);
                 _shotTimer[p] += 1.0 / RoundsPerSecond;
                 _lastVolley[p] = tick;
             }
@@ -211,10 +228,11 @@ public sealed class GunsModule : IModule
                 overheated = false;
         }
 
-        _states[p] = new GunState(p, (float)_heat[p], overheated, firing, shots);
+        _boost[p] = _boost[p] - dt > Epsilon ? _boost[p] - dt : 0.0;
+        _states[p] = new GunState(p, (float)_heat[p], overheated, firing, shots, (float)_boost[p]);
     }
 
-    private void Spawn(int shooter, int gun, int serial)
+    private void Spawn(int shooter, int gun, int serial, bool boosted)
     {
         for (int i = 0; i < PoolSize; i++)
         {
@@ -223,7 +241,7 @@ public sealed class GunsModule : IModule
             ref readonly var plane = ref _planes[shooter];
             var forward = Vector3.Transform(-Vector3.UnitZ, plane.Orientation);
             var muzzle = MuzzlePosition(shooter, gun);
-            _bullets[i] = new Bullet(muzzle, muzzle, plane.Velocity + forward * MuzzleSpeed, 0, serial, gun, true, shooter);
+            _bullets[i] = new Bullet(muzzle, muzzle, plane.Velocity + forward * MuzzleSpeed, 0, serial, gun, true, shooter, boosted);
             return;
         }
     }
@@ -248,22 +266,36 @@ public sealed class GunsModule : IModule
                 ref readonly var hit = ref _planes[plane];
                 var part = PartAt(at, hit.Position, hit.Orientation);
                 int shooter = bullet.Shooter;
+                float amount = bullet.Boosted ? BulletDamage * BoostFactor : BulletDamage;
                 bullet = default;
                 Record(at, plane);
-                _bus?.Publish(new PlaneHit(plane, shooter, part, BulletDamage));
+                _bus?.Publish(new PlaneHit(plane, shooter, part, amount));
                 continue;
             }
             if (target >= 0)
             {
+                int shooter = bullet.Shooter;
+                int amount = bullet.Boosted ? BoostedBalloonDamage(shooter) : 1;
                 bullet = default;
                 Record(Vector3.Lerp(from, to, targetT), -1);
-                _bus?.Publish(new DamageTarget(target, 1));
+                _bus?.Publish(new DamageTarget(target, amount, shooter));
                 continue;
             }
             bullet = age >= BulletLifeSeconds - Epsilon
                 ? default
-                : new Bullet(to, from, bullet.Velocity, age, bullet.Serial, bullet.Gun, true, bullet.Shooter);
+                : new Bullet(to, from, bullet.Velocity, age, bullet.Serial, bullet.Gun, true, bullet.Shooter, bullet.Boosted);
         }
+    }
+
+    // A boosted bullet's balloon damage: 1 x 1.5, rounded down, with the half left over carried
+    // to the plane's next boosted balloon hit, so its hits go 1, 2, 1, 2 (1.5 on average) and
+    // never below 1.
+    private int BoostedBalloonDamage(int shooter)
+    {
+        float exact = BoostFactor + _balloonCarry[shooter];
+        int amount = (int)MathF.Floor(exact + 1e-4f);
+        _balloonCarry[shooter] = exact - amount;
+        return amount;
     }
 
     private void Record(Vector3 at, int plane)
@@ -360,6 +392,20 @@ public sealed class GunsModule : IModule
         }
     }
 
+    private sealed class DestroyedHandler : IMessageHandler<TargetDestroyed>
+    {
+        private readonly GunsModule _module;
+
+        public DestroyedHandler(GunsModule module) => _module = module;
+
+        public void Handle(in TargetDestroyed message)
+        {
+            int id = message.ShooterPlaneId;
+            if ((uint)id < Planes)
+                _module._boost[id] = BoostSeconds;
+        }
+    }
+
     private sealed class TargetHandler : IMessageHandler<TargetState>
     {
         private readonly GunsModule _module;
@@ -382,7 +428,13 @@ public sealed class GunsModule : IModule
 public readonly struct Bullet
 {
     public Bullet(Vector3 position, Vector3 previousPosition, Vector3 velocity, double age, int serial, int gun, bool alive, int shooter)
+        : this(position, previousPosition, velocity, age, serial, gun, alive, shooter, false)
     {
+    }
+
+    public Bullet(Vector3 position, Vector3 previousPosition, Vector3 velocity, double age, int serial, int gun, bool alive, int shooter, bool boosted)
+    {
+        Boosted = boosted;
         Shooter = shooter;
         Position = position;
         PreviousPosition = previousPosition;
@@ -413,6 +465,9 @@ public readonly struct Bullet
 
     /// <summary>0 left gun, 1 right gun.</summary>
     public int Gun { get; }
+
+    /// <summary>Fired while its plane's damage boost ran: it does 1.5x damage and its tracer looks hotter.</summary>
+    public bool Boosted { get; }
 
     /// <summary>In flight; false for a free pool slot.</summary>
     public bool Alive { get; }

@@ -350,6 +350,7 @@ public class GunsModuleTests
         {
             Assert.Equal(3, d.TargetId);
             Assert.Equal(1, d.Amount);
+            Assert.Equal(0, d.ShooterPlaneId); // the bullet's shooter
         }
         Assert.Equal(0, guns.LiveBullets);
         Assert.Equal(2, guns.Hits);
@@ -415,6 +416,133 @@ public class GunsModuleTests
             Assert.Equal(2, state.ShotsFired);
             Assert.Equal(guns.State.Heat, state.Heat);
         }
+    }
+
+    private static void Pop(FakeBus bus, int shooter) => bus.Send(new TargetDestroyed(4, Vector3.Zero, shooter));
+
+    // Plane 0 fires one volley at an enemy plane 200 m ahead; the two PlaneHit amounts.
+    private static float[] VolleyAtEnemy(GunsModule guns, FakeBus bus)
+    {
+        bus.Send(new PlaneState(6, Start + new Vector3(0f, 0f, -200f), Quaternion.Identity, Vector3.Zero, 0f, 1f));
+        Trigger(bus, true);
+        Ticks(guns, 1);
+        Trigger(bus, false);
+        bus.Clear();
+        Ticks(guns, 30);
+        var hits = bus.All<PlaneHit>();
+        Assert.Equal(2, hits.Count);
+        return new[] { hits[0].Amount, hits[1].Amount };
+    }
+
+    [Fact]
+    public void APopBoostsOnlyThePlaneThatPoppedItAndGunStateShowsTheTimeLeft()
+    {
+        var (guns, bus) = Started(fire: false);
+        bus.Send(new PlaneState(2, Start + new Vector3(30f, 0f, 0f), Quaternion.Identity, PlaneVelocity, 50f, 1f));
+        Ticks(guns, 10);
+        Assert.Equal(0f, guns.State.BoostSecondsLeft);
+
+        Pop(bus, -1); // popped by nobody known
+        Pop(bus, 9); // no such plane
+        Ticks(guns, 1);
+        for (int p = 0; p < Teams.PlaneCount; p++)
+        {
+            Assert.Equal(0f, guns.StateOf(p).BoostSecondsLeft);
+            Assert.False(guns.Boosted(p));
+        }
+
+        Pop(bus, 2);
+        bus.Clear();
+        Ticks(guns, 1);
+        Assert.Equal(0f, guns.StateOf(0).BoostSecondsLeft);
+        Assert.InRange(guns.StateOf(2).BoostSecondsLeft, 60f - Dt - 1e-3f, 60f - Dt + 1e-3f);
+        Assert.True(guns.Boosted(2));
+        Assert.False(guns.Boosted(0));
+        var published = bus.All<GunState>();
+        Assert.Equal(guns.StateOf(2).BoostSecondsLeft, published[2].BoostSecondsLeft);
+        Assert.Equal(0f, published[0].BoostSecondsLeft);
+
+        Ticks(guns, 600); // counts down in game time
+        Assert.InRange(guns.StateOf(2).BoostSecondsLeft, 50f - Dt - 1e-3f, 50f - Dt + 1e-3f);
+
+        // Plane 0 is not boosted: its hits stay at 0.04.
+        Assert.All(VolleyAtEnemy(guns, bus), a => Assert.Equal(0.04f, a));
+    }
+
+    [Fact]
+    public void BoostedBulletsDoOneAndAHalfTimesDamageToPlanes()
+    {
+        var (guns, bus) = Started(fire: false);
+        Assert.All(VolleyAtEnemy(guns, bus), a => Assert.Equal(0.04f, a));
+        Pop(bus, 0);
+        Assert.All(VolleyAtEnemy(guns, bus), a => Assert.Equal(0.06f, a, 1e-6f));
+        Assert.All(guns.Bullets.ToArray(), b => Assert.False(b.Alive));
+    }
+
+    [Fact]
+    public void TheBoostLastsSixtySeconds()
+    {
+        var (guns, bus) = Started(fire: false);
+        Pop(bus, 0);
+        Ticks(guns, 3599);
+        Assert.InRange(guns.State.BoostSecondsLeft, Dt - 1e-3f, Dt + 1e-3f);
+        Assert.True(guns.Boosted(0));
+        Ticks(guns, 1); // 60 s
+        Assert.Equal(0f, guns.State.BoostSecondsLeft);
+        Assert.False(guns.Boosted(0));
+        Assert.All(VolleyAtEnemy(guns, bus), a => Assert.Equal(0.04f, a));
+        Assert.Equal(0f, guns.State.BoostSecondsLeft);
+    }
+
+    [Fact]
+    public void ANewPopRestartsTheBoostButDoesNotStack()
+    {
+        var (guns, bus) = Started(fire: false);
+        Pop(bus, 0);
+        Ticks(guns, 1800); // 30 s
+        Assert.InRange(guns.State.BoostSecondsLeft, 30f - 1e-3f, 30f + 1e-3f);
+        Pop(bus, 0);
+        Ticks(guns, 1);
+        Assert.InRange(guns.State.BoostSecondsLeft, 60f - Dt - 1e-3f, 60f - Dt + 1e-3f); // restarted, not 90
+
+        Pop(bus, 0);
+        Pop(bus, 0); // two pops at once: still 60 s, not 120
+        Ticks(guns, 1);
+        Assert.InRange(guns.State.BoostSecondsLeft, 60f - Dt - 1e-3f, 60f - Dt + 1e-3f);
+        Assert.All(VolleyAtEnemy(guns, bus), a => Assert.Equal(0.06f, a, 1e-6f)); // not 0.09
+
+        Ticks(guns, 3600 - 33); // 32 ticks have passed since the last pop
+        Assert.True(guns.Boosted(0)); // the restart counts from the last pop
+        Ticks(guns, 1);
+        Assert.False(guns.Boosted(0));
+    }
+
+    [Fact]
+    public void BoostedBalloonHitsAlternateOneAndTwoSoTheyAverageOneAndAHalf()
+    {
+        var (guns, bus) = Started(fire: false);
+        bus.Send(new TargetState(3, Start + new Vector3(0f, 0f, -200f), 9f, 15, true));
+        Pop(bus, 0);
+        Trigger(bus, true);
+        Ticks(guns, 1);
+        Trigger(bus, false);
+        Ticks(guns, 1);
+        Trigger(bus, true);
+        Ticks(guns, 5); // a second volley 0.1 s after the first
+        Trigger(bus, false);
+        Ticks(guns, 40);
+
+        var damage = bus.All<DamageTarget>();
+        Assert.Equal(4, damage.Count);
+        int total = 0;
+        foreach (var d in damage)
+        {
+            Assert.Equal(0, d.ShooterPlaneId);
+            Assert.InRange(d.Amount, 1, 2); // a boosted bullet does at least 1
+            total += d.Amount;
+        }
+        Assert.Equal(6, total); // 4 bullets x 1.5
+        Assert.Equal(new[] { 1, 2, 1, 2 }, damage.ConvertAll(d => d.Amount).ToArray());
     }
 
     [Fact]
@@ -527,6 +655,13 @@ public class GunsModuleTests
         }
         bus.Target!.Handle(in target);
         bus.Target.Handle(in miss);
+        // Half the planes popped a balloon: the measured steps fire boosted and unboosted
+        // bullets, and the boosts run out mid-measurement.
+        for (int p = 0; p < Teams.PlaneCount; p += 2)
+        {
+            var pop = new TargetDestroyed(1, Vector3.Zero, p);
+            bus.Destroyed!.Handle(in pop);
+        }
         guns.Tick(in OneStep);
 
         void Step()
