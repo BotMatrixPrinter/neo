@@ -1,6 +1,6 @@
 // Toon material of the ground: a patchwork of fields (greens and golden yellows) with dark
 // hedges and ink lines between them on the low land, grassier hills, rocky faceted mountain
-// slopes with a snow or pale rock cap, all painted from the world position and normal; and the
+// slopes with a snow or pale rock cap (on the wall ring: higher lines, taller strata), all painted from the world position and normal; and the
 // water (river, lakes) where UV.x < 0: bright blue with soft foam at the shore and animated
 // ripples. UV.x is set by WorldView: height above the water on land, minus the depth on water.
 shader_type spatial;
@@ -10,6 +10,12 @@ render_mode specular_disabled;
 
 uniform float snow_line = 192.0;
 uniform float pale_line = 150.0;
+// Height (m) of a rock stratum and how far (m) the snow and pale rock lines wander: larger on the wall ring.
+uniform float strata_size = 17.0;
+uniform float line_wander = 1.0;
+// How much darker the dark rock strata are (1: as dark as ROCK_DARK), and how much higher snow starts on steep rock (m).
+uniform float strata_contrast = 1.0;
+uniform float snow_steep = 6.0;
 uniform float ink_fade_start = 500.0;
 uniform float ink_fade_end = 1600.0;
 
@@ -110,10 +116,10 @@ void fragment() {
 	// facets (the triangle's own normal) for a low-poly look; snow or pale rock on the tops.
 	float steep = 1.0 - smoothstep(0.62, 0.8, normalize(world_normal).y);
 	float rock = max(smoothstep(48.0, 80.0, y), steep * smoothstep(28.0, 48.0, y));
-	float strata = step(0.5, fract(y / 17.0 + 0.6 * noise(p * 0.012)));
-	color = mix(color, mix(ROCK_DARK, ROCK, strata) * (0.92 + 0.16 * noise(p * 0.04)), rock);
-	color = mix(color, PALE_ROCK, smoothstep(pale_line - 8.0, pale_line + 8.0, y + 14.0 * noise(p * 0.02)));
-	color = mix(color, SNOW, smoothstep(snow_line - 2.0, snow_line + 2.0, y + 16.0 * noise(p * 0.018) - 6.0 * steep));
+	float strata = step(0.5, fract(y / strata_size + 0.6 * noise(p * 0.012 * 17.0 / strata_size) + 0.004 * dot(p, vec2(0.6, 0.8))));
+	color = mix(color, mix(ROCK, ROCK_DARK, (1.0 - strata) * strata_contrast) * (0.92 + 0.16 * noise(p * 0.04)), rock);
+	color = mix(color, PALE_ROCK, smoothstep(pale_line - 8.0, pale_line + 8.0, y + line_wander * 14.0 * noise(p * 0.02)));
+	color = mix(color, SNOW, smoothstep(snow_line - 2.0, snow_line + 2.0, y + line_wander * 16.0 * noise(p * 0.018 / line_wander) - snow_steep * steep));
 	vec3 facet = normalize(cross(dFdy(VERTEX), dFdx(VERTEX)));
 	NORMAL = normalize(mix(NORMAL, facet, rock));
 

@@ -56,9 +56,10 @@ public class WorldModuleTests
     }
 
     [Fact]
-    public void BoundsAreTheFourKilometerGroundAtZero()
+    public void BoundsAreTheTwoKilometerPlayableSquareAtZero()
     {
-        Assert.Equal(4000f, 2 * WorldBounds.HalfSize);
+        Assert.Equal(1000f, WorldBounds.HalfSize);
+        Assert.Equal(2000f, 2 * WorldBounds.HalfSize);
         Assert.Equal(0f, WorldBounds.GroundY);
         Assert.Equal(Terrain.MaxHeight, WorldBounds.MaxHillHeight);
         Assert.Equal(WorldBounds.GroundY, Terrain.WaterLevel);

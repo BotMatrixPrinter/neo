@@ -1,4 +1,4 @@
-[gd_scene load_steps=15 format=3]
+[gd_scene load_steps=16 format=3]
 
 [ext_resource type="Script" path="res://modules/World/Godot/WorldView.cs" id="1_view"]
 [ext_resource type="Shader" path="res://modules/World/Godot/Ground.gdshader" id="2_ground"]
@@ -31,9 +31,9 @@ fog_mode = 1
 fog_light_color = Color(0.8, 0.9, 0.96, 1)
 fog_light_energy = 1.0
 fog_sky_affect = 0.0
-fog_depth_curve = 1.6
-fog_depth_begin = 900.0
-fog_depth_end = 4200.0
+fog_depth_curve = 1.8
+fog_depth_begin = 700.0
+fog_depth_end = 7000.0
 
 [sub_resource type="ShaderMaterial" id="ground_outline"]
 render_priority = 0
@@ -44,6 +44,16 @@ shader_parameter/radial_from_uv = false
 [sub_resource type="ShaderMaterial" id="ground_mat"]
 next_pass = SubResource("ground_outline")
 shader = ExtResource("2_ground")
+
+[sub_resource type="ShaderMaterial" id="wall_mat"]
+next_pass = SubResource("ground_outline")
+shader = ExtResource("2_ground")
+shader_parameter/snow_line = 2050.0
+shader_parameter/pale_line = 1850.0
+shader_parameter/strata_size = 140.0
+shader_parameter/line_wander = 8.0
+shader_parameter/strata_contrast = 0.12
+shader_parameter/snow_steep = 450.0
 
 [sub_resource type="ShaderMaterial" id="tree_outline"]
 shader = ExtResource("4_outline")
@@ -74,6 +84,10 @@ directional_shadow_max_distance = 600.0
 [node name="Ground" type="MeshInstance3D" parent="."]
 material_override = SubResource("ground_mat")
 
+[node name="Wall" type="MeshInstance3D" parent="."]
+material_override = SubResource("wall_mat")
+cast_shadow = 0
+
 [node name="RoundTrees" type="MultiMeshInstance3D" parent="."]
 material_override = SubResource("tree_mat")
 
@@ -81,7 +95,7 @@ material_override = SubResource("tree_mat")
 material_override = SubResource("tree_mat")
 
 [node name="PreviewCamera" type="Camera3D" parent="."]
-transform = Transform3D(0.985736, -0.025595, 0.166339, 0, 0.988368, 0.152081, -0.168296, -0.149912, 0.97427, 250, 320, 1750)
-fov = 60.0
-far = 6000.0
+transform = Transform3D(1, 0, 0, 0, 0.978148, -0.207912, 0, 0.207912, 0.978148, 150, 420, 850)
+fov = 70.0
+far = 12000.0
 current = true

@@ -6,9 +6,11 @@ namespace Neo.World;
 
 /// <summary>
 /// Godot side of the World module: builds the countryside you fly over once in
-/// <see cref="_Ready"/>: the ground mesh from <see cref="Terrain.HeightAt"/> (hills, mountains,
-/// the river and lakes, water painted by Ground.gdshader) and the tree clumps. Draws only; no
-/// rules here. Three meshes, each drawn with a toon pass and an ink-outline pass.
+/// <see cref="_Ready"/>: the ground mesh of the playable square from <see cref="Terrain.HeightAt"/>
+/// (hills, mountains, the river and lake, water painted by Ground.gdshader), the wall ring mesh
+/// around it (<see cref="WallMesh"/>: the wall mountains and the ranges behind, out to the haze)
+/// and the tree clumps. Draws only; no rules here. Four meshes, each drawn with a toon pass and an
+/// ink-outline pass.
 /// </summary>
 public partial class WorldView : Node3D, IModuleView
 {
@@ -18,7 +20,7 @@ public partial class WorldView : Node3D, IModuleView
     private const float TreeLine = 110f;
 
     // Tree clumps placed where the preview camera looks (x, z).
-    private static readonly Vector2[] ViewClumps = { new(-150, 1100), new(420, 950), new(-350, 700), new(-20, 600), new(-560, 1250) };
+    private static readonly Vector2[] ViewClumps = { new(-75, 550), new(210, 475), new(-175, 350), new(-10, 300), new(-280, 625) };
 
     /// <summary>Its Core, once the shell binds it (none when the scene runs alone).</summary>
     public WorldModule? Module { get; private set; }
@@ -28,6 +30,7 @@ public partial class WorldView : Node3D, IModuleView
     public override void _Ready()
     {
         GetNode<MeshInstance3D>("Ground").Mesh = BuildGround();
+        GetNode<MeshInstance3D>("Wall").Mesh = BuildWall();
         PlantTrees(GetNode<MultiMeshInstance3D>("RoundTrees"), GetNode<MultiMeshInstance3D>("Poplars"));
         // The preview camera frames the scene when it runs alone (screenshots, the editor);
         // in the game the shell loads it as a child and the player's camera is used.
@@ -44,21 +47,13 @@ public partial class WorldView : Node3D, IModuleView
         var water = new Vector2[side * side];
         var indices = new int[cells * cells * 6];
         const float step = Terrain.GridStep;
-        const float e = 2f;
         for (int iz = 0; iz < side; iz++)
             for (int ix = 0; ix < side; ix++)
             {
-                float x = -HalfSize + ix * step, z = -HalfSize + iz * step;
-                int i = iz * side + ix;
-                float h = Terrain.HeightAt(x, z);
-                vertices[i] = new Vector3(x, h, z);
-                float dhdx = (Terrain.HeightAt(x + e, z) - Terrain.HeightAt(x - e, z)) / (2f * e);
-                float dhdz = (Terrain.HeightAt(x, z + e) - Terrain.HeightAt(x, z - e)) / (2f * e);
-                normals[i] = new Vector3(-dhdx, 1f, -dhdz).Normalized();
                 // UV.x: height above the water level on land, minus the water's depth on water
                 // (Ground.gdshader paints water below 0, foam near 0).
-                float depth = Terrain.WaterDepthAt(x, z);
-                water[i] = new Vector2(depth > 0f ? -depth : h - Terrain.WaterLevel, 0f);
+                int i = iz * side + ix;
+                GroundVertex(-HalfSize + ix * step, -HalfSize + iz * step, out vertices[i], out normals[i], out water[i]);
             }
         int k = 0;
         for (int iz = 0; iz < cells; iz++)
@@ -79,6 +74,54 @@ public partial class WorldView : Node3D, IModuleView
         return mesh;
     }
 
+    /// <summary>A vertex of the ground or the wall at (x, z): on <see cref="Terrain.HeightAt"/>, its normal, its UV (see BuildGround).</summary>
+    private static void GroundVertex(float x, float z, out Vector3 vertex, out Vector3 normal, out Vector2 uv)
+    {
+        const float e = 2f;
+        float h = Terrain.HeightAt(x, z);
+        vertex = new Vector3(x, h, z);
+        float dhdx = (Terrain.HeightAt(x + e, z) - Terrain.HeightAt(x - e, z)) / (2f * e);
+        float dhdz = (Terrain.HeightAt(x, z + e) - Terrain.HeightAt(x, z - e)) / (2f * e);
+        normal = new Vector3(-dhdx, 1f, -dhdz).Normalized();
+        float depth = Terrain.WaterDepthAt(x, z);
+        uv = new Vector2(depth > 0f ? -depth : h - Terrain.WaterLevel, 0f);
+    }
+
+    /// <summary>The wall ring: <see cref="WallMesh.Rings"/> square rings of <see cref="WallMesh.Segments"/> vertices around the ground mesh.</summary>
+    private static ArrayMesh BuildWall()
+    {
+        const int segments = WallMesh.Segments;
+        int rings = WallMesh.Rings;
+        var vertices = new Vector3[rings * segments];
+        var normals = new Vector3[rings * segments];
+        var uvs = new Vector2[rings * segments];
+        var indices = new int[(rings - 1) * segments * 6];
+        for (int r = 0; r < rings; r++)
+            for (int s = 0; s < segments; s++)
+            {
+                WallMesh.Point(r, s, out float x, out float z);
+                int i = r * segments + s;
+                GroundVertex(x, z, out vertices[i], out normals[i], out uvs[i]);
+            }
+        int k = 0;
+        for (int r = 0; r < rings - 1; r++)
+            for (int s = 0; s < segments; s++)
+            {
+                int a = r * segments + s, b = r * segments + (s + 1) % segments, c = a + segments, d = b + segments;
+                indices[k++] = a; indices[k++] = c; indices[k++] = b;
+                indices[k++] = b; indices[k++] = c; indices[k++] = d;
+            }
+        var arrays = new Godot.Collections.Array();
+        arrays.Resize((int)Mesh.ArrayType.Max);
+        arrays[(int)Mesh.ArrayType.Vertex] = vertices;
+        arrays[(int)Mesh.ArrayType.Normal] = normals;
+        arrays[(int)Mesh.ArrayType.TexUV] = uvs;
+        arrays[(int)Mesh.ArrayType.Index] = indices;
+        var mesh = new ArrayMesh();
+        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        return mesh;
+    }
+
     private static void PlantTrees(MultiMeshInstance3D roundNode, MultiMeshInstance3D poplarNode)
     {
         var rng = new RandomNumberGenerator { Seed = Seed };
@@ -87,8 +130,8 @@ public partial class WorldView : Node3D, IModuleView
         for (int clump = 0; clump < 70 + ViewClumps.Length; clump++)
         {
             // A few fixed clumps where the preview camera looks, then random ones.
-            float cx = clump < ViewClumps.Length ? ViewClumps[clump].X : rng.RandfRange(-HalfSize + 150, HalfSize - 150);
-            float cz = clump < ViewClumps.Length ? ViewClumps[clump].Y : rng.RandfRange(-HalfSize + 150, HalfSize - 150);
+            float cx = clump < ViewClumps.Length ? ViewClumps[clump].X : rng.RandfRange(-HalfSize + 80, HalfSize - 80);
+            float cz = clump < ViewClumps.Length ? ViewClumps[clump].Y : rng.RandfRange(-HalfSize + 80, HalfSize - 80);
             if (!CanGrow(cx, cz))
                 continue;
             float radius = rng.RandfRange(25f, 70f);
