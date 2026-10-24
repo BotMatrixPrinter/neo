@@ -8,7 +8,7 @@ public class GamepadFlightTests
     public void LeftStickUpDownIsPitchBackIsNoseUp()
     {
         Assert.Equal(1f, GamepadFlight.Map(new PadState { LeftY = 1f }).Pitch); // back = nose up
-        Assert.Equal(-0.6f, GamepadFlight.Map(new PadState { LeftY = -0.6f }).Pitch);
+        Assert.Equal(GamepadFlight.Stick(-0.6f), GamepadFlight.Map(new PadState { LeftY = -0.6f }).Pitch);
         var state = GamepadFlight.Map(new PadState { LeftY = 0.8f });
         Assert.Equal(0f, state.Roll);
         Assert.Equal(0f, state.Yaw);
@@ -18,7 +18,7 @@ public class GamepadFlightTests
     public void LeftStickLeftRightIsYaw()
     {
         var right = GamepadFlight.Map(new PadState { LeftX = 0.7f });
-        Assert.Equal(0.7f, right.Yaw);
+        Assert.Equal(GamepadFlight.Stick(0.7f), right.Yaw);
         Assert.Equal(0f, right.Roll);
         Assert.Equal(0f, right.Pitch);
         Assert.Equal(-1f, GamepadFlight.Map(new PadState { LeftX = -1f }).Yaw);
@@ -28,10 +28,11 @@ public class GamepadFlightTests
     public void RightStickLeftRightIsRoll()
     {
         var right = GamepadFlight.Map(new PadState { RightX = 0.9f });
-        Assert.Equal(0.9f, right.Roll);
+        Assert.Equal(GamepadFlight.Stick(0.9f), right.Roll);
         Assert.Equal(0f, right.Yaw);
         Assert.Equal(0f, right.Pitch);
-        Assert.Equal(-0.5f, GamepadFlight.Map(new PadState { RightX = -0.5f }).Roll);
+        Assert.Equal(1f, GamepadFlight.Map(new PadState { RightX = 1f }).Roll);
+        Assert.Equal(GamepadFlight.Stick(-0.5f), GamepadFlight.Map(new PadState { RightX = -0.5f }).Roll);
     }
 
     [Fact]
@@ -69,7 +70,7 @@ public class GamepadFlightTests
         // Held with the sticks: the axes still come through (Flight decides to ignore them).
         var flying = GamepadFlight.Map(new PadState { Y = true, LeftY = 0.8f, X = true });
         Assert.True(flying.Repair);
-        Assert.Equal(0.8f, flying.Pitch);
+        Assert.Equal(GamepadFlight.Stick(0.8f), flying.Pitch);
         Assert.Equal(1f, flying.ThrottleUp);
     }
 
@@ -92,28 +93,98 @@ public class GamepadFlightTests
         Assert.Equal(fire, GamepadFlight.Map(new PadState { RightTrigger = trigger, A = a }).Fire);
     }
 
-    [Theory]
-    [InlineData(0.15f, 0f)]
-    [InlineData(-0.15f, 0f)]
-    [InlineData(0.1f, 0f)]
-    [InlineData(-0.05f, 0f)]
-    [InlineData(0.16f, 0.16f)]
-    [InlineData(-0.3f, -0.3f)]
-    [InlineData(float.NaN, 0f)]
-    public void EveryStickAxisHasTheSameDeadZone(float raw, float expected)
+    [Fact]
+    public void DeadZoneIsSmallAndResponseLinear()
     {
-        Assert.Equal(0.15f, GamepadFlight.Deadzone);
+        Assert.Equal(0.04f, GamepadFlight.Deadzone);
+        Assert.Equal(1f, GamepadFlight.ResponseExponent);
+    }
+
+    [Theory]
+    [InlineData(0.05f, 0.0104f)] // 5% = a small adjustment
+    [InlineData(0.5f, 0.4792f)]
+    [InlineData(-0.5f, -0.4792f)]
+    [InlineData(0.8f, 0.7917f)]
+    [InlineData(-0.05f, -0.0104f)]
+    public void StickIsProportionalToHowFarItIsPushed(float raw, float expected)
+    {
+        Assert.Equal(expected, GamepadFlight.Stick(raw), 3);
+        Assert.Equal(GamepadFlight.Stick(raw), GamepadFlight.Map(new PadState { LeftY = raw }).Pitch);
+        Assert.Equal(GamepadFlight.Stick(raw), GamepadFlight.Map(new PadState { LeftX = raw }).Yaw);
+        Assert.Equal(GamepadFlight.Stick(raw), GamepadFlight.Map(new PadState { RightX = raw }).Roll);
+    }
+
+    [Theory]
+    [InlineData(1f, 1f)]
+    [InlineData(-1f, -1f)]
+    [InlineData(1.3f, 1f)] // over-range readings clamp
+    [InlineData(-2f, -1f)]
+    public void FullDeflectionIsExactlyOne(float raw, float expected)
+    {
+        Assert.Equal(expected, GamepadFlight.Stick(raw));
         Assert.Equal(expected, GamepadFlight.Map(new PadState { LeftY = raw }).Pitch);
         Assert.Equal(expected, GamepadFlight.Map(new PadState { LeftX = raw }).Yaw);
         Assert.Equal(expected, GamepadFlight.Map(new PadState { RightX = raw }).Roll);
-        Assert.Equal(expected != 0, GamepadFlight.HasInput(new PadState { RightY = raw }));
+    }
+
+    [Theory]
+    [InlineData(0f)]
+    [InlineData(0.01f)]
+    [InlineData(-0.03f)]
+    [InlineData(0.04f)]
+    [InlineData(-0.04f)]
+    [InlineData(float.NaN)]
+    [InlineData(float.PositiveInfinity)]
+    [InlineData(float.NegativeInfinity)]
+    public void ZeroInsideTheDeadZoneOrNotFinite(float raw)
+    {
+        Assert.Equal(0f, GamepadFlight.Stick(raw));
+        Assert.Equal(default(DeviceState), GamepadFlight.Map(new PadState { LeftY = raw, LeftX = raw, RightX = raw, RightY = raw }));
+        Assert.False(GamepadFlight.HasInput(new PadState { LeftY = raw, LeftX = raw, RightX = raw, RightY = raw, LeftTrigger = raw, RightTrigger = raw }));
+    }
+
+    [Fact]
+    public void ContinuousAtTheDeadZoneEdge()
+    {
+        var dz = GamepadFlight.Deadzone;
+        Assert.Equal(0f, GamepadFlight.Stick(dz));
+        // Just past the edge the output is tiny, not a jump to the dead zone value.
+        Assert.InRange(GamepadFlight.Stick(dz + 0.001f), 0f, 0.002f);
+        Assert.InRange(GamepadFlight.Stick(-dz - 0.001f), -0.002f, 0f);
+        Assert.True(GamepadFlight.Stick(dz + 0.001f) > 0f);
+    }
+
+    [Fact]
+    public void LinearBetweenTheDeadZoneAndFullDeflection()
+    {
+        var dz = GamepadFlight.Deadzone;
+        var slope = 1f / (1f - dz);
+        for (var v = 0.05f; v <= 1f; v += 0.05f)
+        {
+            Assert.Equal((v - dz) * slope, GamepadFlight.Stick(v), 5);
+            Assert.Equal(-GamepadFlight.Stick(v), GamepadFlight.Stick(-v)); // symmetric
+        }
+        // Equal steps of push give equal steps of output.
+        Assert.Equal(GamepadFlight.Stick(0.6f) - GamepadFlight.Stick(0.4f), GamepadFlight.Stick(0.9f) - GamepadFlight.Stick(0.7f), 5);
+    }
+
+    [Fact]
+    public void TouchDetectionUsesTheSameSmallDeadZone()
+    {
+        Assert.False(GamepadFlight.HasInput(new PadState { RightY = 0.04f }));
+        Assert.True(GamepadFlight.HasInput(new PadState { RightY = 0.05f }));
+        Assert.True(GamepadFlight.HasInput(new PadState { LeftTrigger = -0.05f }));
+        Assert.True(GamepadFlight.HasInput(new PadState { RightTrigger = 0.05f }));
+        Assert.Equal(0f, GamepadFlight.DeadZone(0.04f));
+        Assert.Equal(0.05f, GamepadFlight.DeadZone(0.05f)); // unscaled
+        Assert.Equal(0f, GamepadFlight.DeadZone(float.NaN));
     }
 
     [Fact]
     public void HasInputOnlyWhenSomethingIsTouched()
     {
         Assert.False(GamepadFlight.HasInput(default));
-        Assert.False(GamepadFlight.HasInput(new PadState { LeftX = 0.1f, LeftY = -0.1f, RightX = 0.15f, RightY = 0.05f, LeftTrigger = 0.1f, RightTrigger = 0.1f }));
+        Assert.False(GamepadFlight.HasInput(new PadState { LeftX = 0.03f, LeftY = -0.03f, RightX = 0.04f, RightY = 0.02f, LeftTrigger = 0.03f, RightTrigger = 0.04f }));
         Assert.True(GamepadFlight.HasInput(new PadState { LeftX = 0.5f }));
         Assert.True(GamepadFlight.HasInput(new PadState { RightTrigger = 0.3f }));
         Assert.True(GamepadFlight.HasInput(new PadState { A = true }));

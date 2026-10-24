@@ -336,9 +336,10 @@ public class InputModuleTests
         input.SetState(GamepadFlight.Map(new PadState { LeftY = 0.8f, LeftX = -0.6f, RightX = 0.4f, RightY = 1f }));
         input.Tick(new TickContext(1, Step));
         var msg = Only(bus, 0);
-        Assert.Equal(0.8f, msg.Pitch);
-        Assert.Equal(-0.6f, msg.Yaw);
-        Assert.Equal(0.4f, msg.Roll);
+        Assert.Equal(GamepadFlight.Stick(0.8f), msg.Pitch);
+        Assert.Equal(GamepadFlight.Stick(-0.6f), msg.Yaw);
+        Assert.Equal(GamepadFlight.Stick(0.4f), msg.Roll);
+        Assert.Equal(0.375f, msg.Roll, 4); // (0.4 - 0.04) / 0.96: proportional, not raw
         Assert.False(msg.Fire);
     }
 

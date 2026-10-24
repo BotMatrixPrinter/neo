@@ -42,8 +42,15 @@ trigger or button switches to it, and the first of up to 4 pads with input is re
 | Y (Xbox) / Triangle (PlayStation) | Repair (held; `ControlInput.Repair` true on every tick it is down) |
 | Left trigger | Nothing for now |
 
-Every stick and trigger axis has the same dead zone (`GamepadFlight.Deadzone`, 0.15):
-readings at or below it count as 0, above it pass through unscaled. The triggers do not
+The sticks are proportional: how far a stick is pushed is how hard the plane turns (5% right
+is a small adjustment, 100% a hard right). `GamepadFlight.Stick` gives each stick axis a small
+dead zone (`GamepadFlight.Deadzone`, 0.04, just enough to ignore stick drift), then rescales
+so the output starts at 0 right at the dead zone edge and grows to exactly 1 at full
+deflection: `sign(v) * ((|v| - 0.04) / 0.96) ^ ResponseExponent`, clamped to -1..1 (5% gives
+about 0.01, 50% about 0.48, 100% gives 1; no jump anywhere). `GamepadFlight.ResponseExponent`
+(1.0 = linear) is there for later tuning: above 1 gives finer control near center.
+Non-finite readings give 0. The same 0.04 dead zone (unscaled, `GamepadFlight.DeadZone`)
+decides whether a stick or trigger is being touched; the right trigger fires past 0.5. The triggers do not
 change the throttle. With a gamepad there is no aim either (`HasAim` false): the sticks fly
 the plane.
 
@@ -58,7 +65,7 @@ the plane.
   cycles) is up to the modules that read it. Its constructor clamps the axes, turns non-finite values into 0, normalizes the
   aim direction, and drops the aim (`HasAim` false) if the direction is zero or not finite.
 - **Core** (`Core/`): `InputModule` (`IModule`). Its view calls `SetKeys(KeyState)` (mouse
-  and keyboard) or `SetState(DeviceState)` (gamepad, mapped from the raw `PadState` by `GamepadFlight`: sticks, dead zone,
+  and keyboard) or `SetState(DeviceState)` (gamepad, mapped from the raw `PadState` by `GamepadFlight`: sticks, dead zone and proportional response,
   buttons, fire, repair) each frame; the last one called picks
   the device. On each `Tick` it turns keys into controls with `KeyboardFlight` (key mapping
   and smoothing, `RampSeconds` 0.15, `ReturnSeconds` 0.05; reset when the pad takes over),
@@ -71,7 +78,8 @@ the plane.
 - **Tests** (`Tests/`): `ControlInputTests` (ranges, clamping, aim normalization, no-aim, `Repair` default and set),
   `KeyboardFlightTests` (each key's mapping, invert, throttle, fire and repair keys, smoothing: ramp,
   faster return, taps, reversing), `GamepadFlightTests` (each stick axis, buttons,
-  triggers, fire, Y repair, the dead zone on every axis, what counts as touching the pad), `InputModuleTests` (one message per tick for plane 0,
+  triggers, fire, Y repair, the dead zone and proportional response on every stick axis: 0 inside,
+continuous at the edge, linear, exactly ±1 at full deflection, 5%/50%/100% examples, non-finite = 0; what counts as touching the pad), `InputModuleTests` (one message per tick for plane 0,
   throttle start/smoothing/clamping, R and Y publish `Repair` every held tick with throttle still working, pad X/B throttle and sticks, keys fly the plane, `HasAim` false on keyboard and pad,
   invert setting, latest state wins, no allocations per tick), with a fake bus.
 
