@@ -13,7 +13,9 @@ namespace Neo.Damage;
 /// their first <see cref="PlaneHit"/> or <see cref="PlaneState"/>. While a plane's
 /// <see cref="ControlInput.Repair"/> is held it repairs one part per
 /// <see cref="DamageLimits.RepairSeconds"/>, most damaged first, and publishes a
-/// <see cref="RepairState"/> for every known plane each tick. Allocation-free per tick.
+/// <see cref="RepairState"/> for every known plane each tick. A <see cref="PlaneCrashed"/> downs an
+/// alive plane at once, credited to its last hitter within <see cref="DamageLimits.CrashCreditSeconds"/>
+/// (-1 if none). Allocation-free per tick.
 /// </summary>
 public sealed class DamageModule : IModule
 {
@@ -26,6 +28,9 @@ public sealed class DamageModule : IModule
     private readonly bool[] _alive = new bool[MaxPlanes];
     private readonly double[] _respawnAt = new double[MaxPlanes];
     private readonly int[] _kills = new int[MaxPlanes];
+    // The last other plane whose hit landed (-1 for none since the last respawn) and when.
+    private readonly int[] _lastHitter = new int[MaxPlanes];
+    private readonly double[] _lastHitAt = new double[MaxPlanes];
     // Repair: Repair held since the last tick, the part being repaired (-1 for none) and its seconds held.
     private readonly bool[] _repairHeld = new bool[MaxPlanes];
     private readonly int[] _repairPart = new int[MaxPlanes];
@@ -33,6 +38,7 @@ public sealed class DamageModule : IModule
     private readonly HitHandler _hits;
     private readonly PlaneStateHandler _planes;
     private readonly ControlHandler _controls;
+    private readonly CrashHandler _crashes;
     private IMessageBus? _bus;
     private double _time;
 
@@ -41,8 +47,12 @@ public sealed class DamageModule : IModule
         _hits = new HitHandler(this);
         _planes = new PlaneStateHandler(this);
         _controls = new ControlHandler(this);
+        _crashes = new CrashHandler(this);
         for (int i = 0; i < MaxPlanes; i++)
+        {
             _repairPart[i] = -1;
+            _lastHitter[i] = -1;
+        }
     }
 
     /// <summary>Planes downed by <paramref name="shooterPlaneId"/> since start, for the HUD (0 for an unknown id).</summary>
@@ -79,6 +89,7 @@ public sealed class DamageModule : IModule
         bus.Subscribe(_hits);
         bus.Subscribe(_planes);
         bus.Subscribe(_controls);
+        bus.Subscribe(_crashes);
     }
 
     public void Tick(in TickContext tick)
@@ -185,6 +196,7 @@ public sealed class DamageModule : IModule
     private void Reset(int planeId)
     {
         _alive[planeId] = true;
+        _lastHitter[planeId] = -1;
         CancelRepair(planeId);
         int b = planeId * Parts;
         for (int p = 0; p < Parts; p++)
@@ -203,14 +215,39 @@ public sealed class DamageModule : IModule
         float left = _health[slot] - hit.Amount;
         // A small epsilon so 25 hits of 0.04 really empty a part despite float rounding.
         _health[slot] = left > 1e-5f ? left : 0f;
+        if ((uint)hit.ShooterPlaneId < MaxPlanes && hit.ShooterPlaneId != i)
+        {
+            _lastHitter[i] = hit.ShooterPlaneId;
+            _lastHitAt[i] = _time;
+        }
         if (_health[slot] > 0f)
             return;
-        _alive[i] = false;
-        CancelRepair(i);
-        _respawnAt[i] = _time + DamageLimits.RespawnSeconds;
-        if ((uint)hit.ShooterPlaneId < MaxPlanes && hit.ShooterPlaneId != i)
-            _kills[hit.ShooterPlaneId]++;
-        _bus?.Publish(new PlaneDestroyed(i, hit.ShooterPlaneId));
+        Destroy(i, hit.ShooterPlaneId);
+    }
+
+    private void Crash(in PlaneCrashed crash)
+    {
+        int i = crash.PlaneId;
+        if ((uint)i >= MaxPlanes)
+            return;
+        Learn(i);
+        if (!_alive[i])
+            return;
+        // A pursuer who hit it shortly before gets the kill; otherwise it crashed on its own.
+        int shooter = _lastHitter[i];
+        if (shooter >= 0 && _time - _lastHitAt[i] > DamageLimits.CrashCreditSeconds + 1e-6)
+            shooter = -1;
+        Destroy(i, shooter);
+    }
+
+    private void Destroy(int planeId, int shooterPlaneId)
+    {
+        _alive[planeId] = false;
+        CancelRepair(planeId);
+        _respawnAt[planeId] = _time + DamageLimits.RespawnSeconds;
+        if ((uint)shooterPlaneId < MaxPlanes && shooterPlaneId != planeId)
+            _kills[shooterPlaneId]++;
+        _bus?.Publish(new PlaneDestroyed(planeId, shooterPlaneId));
     }
 
     private sealed class HitHandler : IMessageHandler<PlaneHit>
@@ -229,6 +266,15 @@ public sealed class DamageModule : IModule
         public PlaneStateHandler(DamageModule owner) => _owner = owner;
 
         public void Handle(in PlaneState message) => _owner.Learn(message.PlaneId);
+    }
+
+    private sealed class CrashHandler : IMessageHandler<PlaneCrashed>
+    {
+        private readonly DamageModule _owner;
+
+        public CrashHandler(DamageModule owner) => _owner = owner;
+
+        public void Handle(in PlaneCrashed message) => _owner.Crash(in message);
     }
 
     private sealed class ControlHandler : IMessageHandler<ControlInput>

@@ -11,4 +11,7 @@ public static class DamageLimits
 
     /// <summary>Seconds of continuously holding Repair to fix one part (see <see cref="RepairState"/>).</summary>
     public const double RepairSeconds = 4.0;
+
+    /// <summary>A crash (<c>Neo.Flight.PlaneCrashed</c>) is credited to the last plane that hit it within these seconds.</summary>
+    public const double CrashCreditSeconds = 10.0;
 }

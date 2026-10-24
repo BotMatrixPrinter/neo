@@ -216,6 +216,157 @@ public class DamageModuleTests
         Assert.Equal(0, damage.Kills(1000));
     }
 
+    private static PlaneCrashed Crashed(int id) => new(id, new Vector3(100, 3, -50), 55f);
+
+    [Fact]
+    public void CrashDestroysAnAlivePlaneAtOnce()
+    {
+        var (damage, bus) = Started();
+        bus.Send(Flying(2));
+        bus.Send(new PlaneHit(2, 6, PlanePart.Tail, 0.2f));
+        Tick(damage, 10);
+        bus.Clear();
+
+        bus.Send(Crashed(2));
+        var destroyed = Assert.Single(bus.All<PlaneDestroyed>());
+        Assert.Equal(2, destroyed.PlaneId);
+        Assert.False(damage.GetState(2).Alive);
+        Tick(damage);
+        Assert.False(Assert.Single(bus.All<PlaneDamageState>()).Alive);
+
+        // A plane never hit or seen before also crashes: known and down from then on.
+        bus.Clear();
+        bus.Send(Crashed(9));
+        Assert.True(damage.IsKnown(9));
+        Assert.False(damage.GetState(9).Alive);
+        Assert.Equal(9, Assert.Single(bus.All<PlaneDestroyed>()).PlaneId);
+    }
+
+    [Fact]
+    public void CrashWithoutHitsIsCreditedToNobody()
+    {
+        var (damage, bus) = Started();
+        bus.Send(Flying(0));
+        Tick(damage, 60);
+        bus.Send(Crashed(0));
+
+        Assert.Equal(-1, Assert.Single(bus.All<PlaneDestroyed>()).ShooterPlaneId);
+        for (int i = 0; i < 8; i++)
+            Assert.Equal(0, damage.Kills(i));
+    }
+
+    [Fact]
+    public void CrashIsCreditedToTheLastHitterWithinTenSeconds()
+    {
+        var (damage, bus) = Started();
+        bus.Send(new PlaneHit(1, 5, PlanePart.Engine, Bullet));
+        Tick(damage, 60);
+        // The last hit counts, not the first.
+        bus.Send(new PlaneHit(1, 6, PlanePart.LeftWing, Bullet));
+        // 10 s later exactly (600 steps): still credited.
+        Tick(damage, 600);
+        bus.Send(Crashed(1));
+
+        var destroyed = Assert.Single(bus.All<PlaneDestroyed>());
+        Assert.Equal(1, destroyed.PlaneId);
+        Assert.Equal(6, destroyed.ShooterPlaneId);
+        Assert.Equal(1, damage.Kills(6));
+        Assert.Equal(0, damage.Kills(5));
+    }
+
+    [Fact]
+    public void CrashMoreThanTenSecondsAfterTheLastHitIsCreditedToNobody()
+    {
+        var (damage, bus) = Started();
+        bus.Send(new PlaneHit(4, 0, PlanePart.Tail, Bullet));
+        Tick(damage, 601);
+        bus.Send(Crashed(4));
+
+        Assert.Equal(-1, Assert.Single(bus.All<PlaneDestroyed>()).ShooterPlaneId);
+        Assert.Equal(0, damage.Kills(0));
+    }
+
+    [Fact]
+    public void CrashIgnoresSelfHitsAndHitsFromBeforeARespawn()
+    {
+        var (damage, bus) = Started();
+        // A self hit is no pursuer.
+        bus.Send(new PlaneHit(3, 3, PlanePart.Engine, Bullet));
+        bus.Send(Crashed(3));
+        Assert.Equal(-1, bus.All<PlaneDestroyed>()[0].ShooterPlaneId);
+
+        // Hit by 7 just before being shot down by 5: after the respawn, a crash within 10 s of
+        // those hits is still on its own (they were in its previous life).
+        Tick(damage, 300);
+        Assert.True(damage.GetState(3).Alive);
+        bus.Send(new PlaneHit(3, 7, PlanePart.Tail, Bullet));
+        Down(bus, 3, 5);
+        Tick(damage, 300);
+        Assert.True(damage.GetState(3).Alive);
+        Tick(damage, 60);
+        bus.Send(Crashed(3));
+
+        var destroyed = bus.All<PlaneDestroyed>();
+        Assert.Equal(3, destroyed.Count);
+        Assert.Equal(5, destroyed[1].ShooterPlaneId);
+        Assert.Equal(-1, destroyed[2].ShooterPlaneId);
+        Assert.Equal(0, damage.Kills(7));
+        Assert.Equal(1, damage.Kills(5));
+    }
+
+    [Fact]
+    public void CrashOfADownedPlaneChangesNothing()
+    {
+        var (damage, bus) = Started();
+        Down(bus, 5, 1);
+        Tick(damage, 120);
+        // The shot-down plane falls and hits the ground, twice even: no second downing, no second kill,
+        // and the respawn stays 5 s after the shoot-down.
+        bus.Send(Crashed(5));
+        bus.Send(Crashed(5));
+        Assert.Single(bus.All<PlaneDestroyed>());
+        Assert.Equal(1, damage.Kills(1));
+        Tick(damage, 179);
+        Assert.Empty(bus.All<PlaneRespawn>());
+        Tick(damage);
+        Assert.Single(bus.All<PlaneRespawn>());
+
+        // A crash after a crash is ignored as well.
+        bus.Clear();
+        bus.Send(Crashed(2));
+        Tick(damage, 30);
+        bus.Send(Crashed(2));
+        Assert.Single(bus.All<PlaneDestroyed>());
+        Assert.False(damage.GetState(2).Alive);
+    }
+
+    [Fact]
+    public void CrashedPlaneRespawnsAfterFiveSecondsAndCanCrashAgain()
+    {
+        var (damage, bus) = Started();
+        bus.Send(new PlaneHit(6, 2, PlanePart.RightWing, 0.5f));
+        Tick(damage, 30);
+        bus.Send(Crashed(6));
+        bus.Clear();
+
+        Tick(damage, 299);
+        Assert.Empty(bus.All<PlaneRespawn>());
+        Assert.False(damage.GetState(6).Alive);
+        bus.Clear();
+        Tick(damage);
+        Assert.Equal(6, Assert.Single(bus.All<PlaneRespawn>()).PlaneId);
+        var state = Assert.Single(bus.All<PlaneDamageState>());
+        Assert.True(state.Alive);
+        Assert.Equal(1f, state.RightWing);
+
+        Tick(damage, 600);
+        Assert.Single(bus.All<PlaneRespawn>());
+        bus.Send(Crashed(6));
+        Assert.Equal(-1, Assert.Single(bus.All<PlaneDestroyed>()).ShooterPlaneId);
+        Tick(damage, 300);
+        Assert.Equal(2, bus.All<PlaneRespawn>().Count);
+    }
+
     [Fact]
     public void StatesPublishedEveryTickForEveryKnownPlane()
     {
