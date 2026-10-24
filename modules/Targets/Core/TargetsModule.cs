@@ -20,7 +20,8 @@ public sealed class TargetsModule : IModule
     /// <summary>Hit sphere radius, in meters.</summary>
     public const float HitRadius = 9f;
 
-    public const double RespawnSeconds = 10;
+    /// <summary>Seconds a popped balloon stays down before it comes back.</summary>
+    public const double RespawnSeconds = 60;
 
     // Tether points spread around the 4 km x 4 km area centered on the origin, 300 to 500 m up.
     private static readonly Vector3[] Anchors =
@@ -83,7 +84,7 @@ public sealed class TargetsModule : IModule
             return;
         _respawnAt[i] = _time + RespawnSeconds;
         Pops++;
-        _bus?.Publish(new TargetDestroyed(i, _positions[i]));
+        _bus?.Publish(new TargetDestroyed(i, _positions[i], hit.ShooterPlaneId));
     }
 
     // A slow, small drift around each tether point (under 2 m), each balloon out of phase.

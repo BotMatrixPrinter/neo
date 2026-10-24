@@ -13,7 +13,6 @@ public partial class TargetsView : Node3D, IModuleView
 {
     private const int Puffs = 7;
     private const int Shreds = 12;
-    private const float PopSeconds = 1.4f;
     private const float PreviewPopAt = 1.5f;
 
     private static readonly Color Cream = new(0.96f, 0.91f, 0.76f);
@@ -23,6 +22,7 @@ public partial class TargetsView : Node3D, IModuleView
     private static readonly Color Smoke = new(0.62f, 0.6f, 0.58f);
 
     private TargetsModule? _targets;
+    private BalloonViews? _views;
     private MessageBus? _previewBus;
     private float _previewTime;
     private bool _previewPopped;
@@ -35,8 +35,6 @@ public partial class TargetsView : Node3D, IModuleView
     private readonly Vector3[] _puffOffsets = new Vector3[Puffs];
     private readonly Vector3[] _shredVelocities = new Vector3[Shreds];
     private readonly Vector3[] _shredSpins = new Vector3[Shreds];
-    private readonly bool[] _alive = new bool[TargetsModule.Count];
-    private readonly float[] _popAge = new float[TargetsModule.Count];
 
     public void Bind(IModule module) => _targets = (TargetsModule)module;
 
@@ -44,6 +42,7 @@ public partial class TargetsView : Node3D, IModuleView
     {
         if (_targets == null)
             StartPreview();
+        _views = new BalloonViews(_targets!);
 
         var cream = Toon(Cream);
         var stripe = Toon(Stripe);
@@ -113,9 +112,7 @@ public partial class TargetsView : Node3D, IModuleView
             _balloons[i] = balloon;
             _shapes[i] = shape;
             _pops[i] = pop;
-            _alive[i] = state.Alive;
-            _popAge[i] = -1;
-            shape.Visible = state.Alive;
+            shape.Visible = _views.ShapeVisible(i);
         }
 
         if (_previewBus != null)
@@ -137,36 +134,23 @@ public partial class TargetsView : Node3D, IModuleView
 
     public override void _Process(double delta)
     {
-        if (_targets == null)
+        if (_views == null)
             return;
+        _views.Update((float)delta);
         for (int i = 0; i < TargetsModule.Count; i++)
         {
-            var state = _targets.GetState(i);
-            _balloons[i].Position = ToGodot(state.Position);
-            if (state.Alive != _alive[i])
-            {
-                _alive[i] = state.Alive;
-                _shapes[i].Visible = state.Alive;
-                if (!state.Alive)
-                    _popAge[i] = 0;
-            }
-            if (_popAge[i] >= 0)
-                AnimatePop(i, (float)delta);
+            _balloons[i].Position = ToGodot(_views.Position(i));
+            _shapes[i].Visible = _views.ShapeVisible(i);
+            _pops[i].Visible = _views.PopPlaying(i);
+            if (_views.PopPlaying(i))
+                AnimatePop(i, _views.PopAge(i));
         }
     }
 
     // Puffs swell then shrink away; shreds fly out, fall and tumble.
-    private void AnimatePop(int i, float delta)
+    private void AnimatePop(int i, float age)
     {
-        float age = _popAge[i] += delta;
-        if (age >= PopSeconds)
-        {
-            _popAge[i] = -1;
-            _pops[i].Visible = false;
-            return;
-        }
-        _pops[i].Visible = true;
-        float k = age / PopSeconds;
+        float k = age / BalloonViews.PopSeconds;
         float puffScale = 4.5f * Mathf.Sin(Mathf.Pi * Mathf.Sqrt(k)) + 0.01f;
         for (int s = 0; s < Puffs; s++)
         {

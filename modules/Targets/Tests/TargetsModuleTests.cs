@@ -149,11 +149,49 @@ public class TargetsModuleTests
         var destroyed = Assert.Single(bus.All<TargetDestroyed>());
         Assert.Equal(3, destroyed.TargetId);
         Assert.Equal(where, destroyed.Position);
+        Assert.Equal(-1, destroyed.ShooterPlaneId); // the old constructor: shooter unknown
 
         var state = targets.GetState(3);
         Assert.False(state.Alive);
         Assert.Equal(0, state.Health);
         Assert.Equal(1, targets.Pops);
+    }
+
+    [Fact]
+    public void TheShooterOfTheLastHitIsRecordedOnThePop()
+    {
+        var (targets, bus) = Started();
+        bus.Send(new DamageTarget(2, 10, 5));
+        bus.Send(new DamageTarget(2, 3, 1));
+        Assert.Empty(bus.All<TargetDestroyed>());
+        bus.Send(new DamageTarget(2, 4, 6)); // takes the last health
+        bus.Send(new DamageTarget(2, 4, 7)); // too late: already popped
+
+        var destroyed = Assert.Single(bus.All<TargetDestroyed>());
+        Assert.Equal(2, destroyed.TargetId);
+        Assert.Equal(6, destroyed.ShooterPlaneId);
+        Assert.Equal(1, targets.Pops);
+    }
+
+    [Fact]
+    public void AnUnknownShooterIsMinusOne()
+    {
+        var (_, bus) = Started();
+        var hit = new DamageTarget(1, 15);
+        Assert.Equal(-1, hit.ShooterPlaneId);
+        Assert.Equal(1, hit.TargetId);
+        Assert.Equal(15, hit.Amount);
+        bus.Send(hit);
+        Assert.Equal(-1, Assert.Single(bus.All<TargetDestroyed>()).ShooterPlaneId);
+
+        bus.Send(new DamageTarget(0, 15, -1));
+        Assert.Equal(-1, bus.All<TargetDestroyed>()[1].ShooterPlaneId);
+
+        var old = new TargetDestroyed(4, new Vector3(1, 2, 3));
+        Assert.Equal(-1, old.ShooterPlaneId);
+        Assert.Equal(4, old.TargetId);
+        Assert.Equal(new Vector3(1, 2, 3), old.Position);
+        Assert.Equal(3, new TargetDestroyed(4, Vector3.Zero, 3).ShooterPlaneId);
     }
 
     [Fact]
@@ -172,19 +210,22 @@ public class TargetsModuleTests
     }
 
     [Fact]
-    public void ItComesBackWithFullHealthTenSecondsLaterAtTheSameSpot()
+    public void ItComesBackWithFullHealthSixtySecondsLaterAtTheSameSpot()
     {
         var (targets, bus) = Started();
         Ticks(targets, 30);
         var before = targets.GetState(4).Position;
         bus.Send(new DamageTarget(4, 15));
 
-        Ticks(targets, 599); // 9.983 s
+        Assert.Equal(60, TargetsModule.RespawnSeconds);
+        Ticks(targets, 600); // 10 s: still down (it used to come back here)
+        Assert.False(targets.GetState(4).Alive);
+        Ticks(targets, 2999); // 59.983 s
         Assert.False(targets.GetState(4).Alive);
         Assert.Equal(0, targets.GetState(4).Health);
 
         bus.Clear();
-        targets.Tick(in OneStep); // 10 s
+        targets.Tick(in OneStep); // 60 s
         var back = targets.GetState(4);
         Assert.True(back.Alive);
         Assert.Equal(15, back.Health);
@@ -199,13 +240,83 @@ public class TargetsModuleTests
         var (targets, bus) = Started();
         bus.Send(new DamageTarget(1, 15));
         bus.Send(new DamageTarget(2, 15));
-        Ticks(targets, 600);
+        Ticks(targets, 3600);
         bus.Send(new DamageTarget(1, 15));
 
         Assert.Equal(3, targets.Pops);
         var destroyed = bus.All<TargetDestroyed>();
         Assert.Equal(3, destroyed.Count);
         Assert.Equal(new[] { 1, 2, 1 }, new[] { destroyed[0].TargetId, destroyed[1].TargetId, destroyed[2].TargetId });
+    }
+
+    [Fact]
+    public void TheViewHidesAPoppedBalloonAndShowsItAgainAtItsSpotWhenItComesBack()
+    {
+        var (targets, bus) = Started();
+        var views = new BalloonViews(targets);
+        const float frame = 1f / 60;
+        for (int id = 0; id < TargetsModule.Count; id++)
+        {
+            Assert.True(views.ShapeVisible(id));
+            Assert.False(views.PopPlaying(id));
+        }
+
+        Ticks(targets, 30);
+        views.Update(frame);
+        var spot = views.Position(3);
+        Assert.Equal(targets.GetState(3).Position, spot);
+
+        bus.Send(new DamageTarget(3, 15, 2));
+        targets.Tick(in OneStep);
+        views.Update(frame);
+        Assert.False(views.ShapeVisible(3)); // body, basket and cable hidden
+        Assert.True(views.PopPlaying(3));
+        Assert.True(views.ShapeVisible(0));
+        Assert.False(views.PopPlaying(0));
+
+        // The pop effect plays for PopSeconds, then the balloon is just gone.
+        for (int f = 0; f < 120; f++)
+        {
+            targets.Tick(in OneStep);
+            views.Update(frame);
+        }
+        Assert.False(views.ShapeVisible(3));
+        Assert.False(views.PopPlaying(3));
+
+        // Still gone just before 60 s, back (shape, cable and all) at its spot at 60 s.
+        Ticks(targets, 3600 - 122);
+        views.Update(frame);
+        Assert.False(views.ShapeVisible(3));
+        targets.Tick(in OneStep);
+        views.Update(frame);
+        Assert.True(targets.GetState(3).Alive);
+        Assert.True(views.ShapeVisible(3));
+        Assert.False(views.PopPlaying(3));
+        Assert.Equal(targets.GetState(3).Position, views.Position(3));
+        Assert.True(Vector3.Distance(spot, views.Position(3)) < 5f, "it is drawn again at its spot");
+
+        // And it can pop again.
+        bus.Send(new DamageTarget(3, 15));
+        targets.Tick(in OneStep);
+        views.Update(frame);
+        Assert.False(views.ShapeVisible(3));
+        Assert.True(views.PopPlaying(3));
+    }
+
+    [Fact]
+    public void TheViewStateDoesNotAllocate()
+    {
+        var targets = new TargetsModule();
+        targets.Start(new QuietBus());
+        var views = new BalloonViews(targets);
+        views.Update(1f / 60);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 600; i++)
+        {
+            targets.Tick(in OneStep);
+            views.Update(1f / 60);
+        }
+        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
     }
 
     [Fact]
@@ -226,17 +337,17 @@ public class TargetsModuleTests
         var hit = new DamageTarget(0, 15);
         targets.Tick(in OneStep);
         bus.Damage!.Handle(in hit);
-        Ticks(targets, 600);
+        Ticks(targets, 3600);
 
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 10; i++)
         {
             bus.Damage.Handle(in hit);
-            Ticks(targets, 600);
+            Ticks(targets, 3600);
         }
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
         Assert.Equal(11, bus.Destroyed);
-        Assert.Equal(TargetsModule.Count * 6601, bus.StatesPublished);
+        Assert.Equal(TargetsModule.Count * 39601, bus.StatesPublished);
     }
 
     [Fact]
