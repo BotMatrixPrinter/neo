@@ -854,7 +854,12 @@ public class FlightModuleTests
         Assert.True(GroundToCenter(rig.Bus.States[0].Position, 0.15f * Half) <= 5f, "found the open plain");
         Vector3 through = Vector3.Normalize(-rig.Bus.States[0].Position * new Vector3(1f, 0f, 1f)); // its line over the center
         float approach = -Vector3.Dot(rig.Bus.States[0].Position, through);
-        Assert.True(approach > 400f, $"room to get down: {approach} m");
+        // Room to get down from 40 m over the ground to 9 m: a quarter of HalfSize (500 m on today's 2000 m map,
+        // where it finds about 670 m). On a 1000 m map (open center about 200 m across, hills fading in by 400 m)
+        // that is 250 m, and the plane finds about 278 m of open run-in; the drop of about 31 m needs well under
+        // 100 m at the steepest descent Hold allows. The heights (40 m, 9 m, 5 m) and the 300 m look-ahead are
+        // sizes of the plane and its ground check, not of the map, so they stay fixed.
+        Assert.True(approach > 0.25f * Half, $"room to get down: {approach} m");
         for (int i = 0; i < 60 * 60 && Vector3.Dot(rig.Bus.States[0].Position, through) < 0f; i++)
         {
             var p = rig.Step(Hold(rig.Bus.States[0], low));
