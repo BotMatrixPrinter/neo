@@ -1,6 +1,6 @@
 # HUD
 
-The on-screen display: speed, altitude, gun heat, balloons popped, the player's damage, kills
+The on-screen display: markers on the other planes (off-screen arrows toward them), speed, altitude, gun heat, balloons popped, the player's damage, kills
 and deaths, the kill feed and the "shot down" countdown, in the game's cartoon
 style (dark rounded panels with a gold edge, bold outlined text).
 
@@ -8,7 +8,7 @@ style (dark rounded panels with a gold edge, bold outlined text).
 
 Publishes nothing; its Contract (`Neo.HUD.Contract`) is empty for now.
 
-Uses other modules' Contracts: reads `Neo.Flight.PlaneState` (plane 0), `Neo.Guns.GunState`
+Uses other modules' Contracts: reads `Neo.Flight.PlaneState` (every plane; teams from `Neo.Flight.Teams`), `Neo.Guns.GunState`
 (plane 0), `Neo.Targets.TargetDestroyed` (any target), and from `Neo.Damage`:
 `PlaneDamageState` (plane 0), `PlaneDestroyed` (any plane) and `PlaneRespawn` (plane 0).
 
@@ -40,7 +40,18 @@ Plane names (the "Enemy Planes" wave): 0 is the player, "You"; 1-3 are "Blue <id
   `RespawnSecondsLeft` counts down from 5 each Tick, `RespawnCountdown` is it rounded up (5..1,
   at least 1 while down) and `RespawnText` "Back in the air in N" (prebuilt; empty when up).
 
-Messages for other planes are ignored (except in the kill feed). No allocations per Tick or per message.
+- Plane markers: every `PlaneState` (ids 0-7) is kept with the one before (not across a respawn),
+  like the Plane view; `HasMarker(id)` for another plane than the player's that is alive in its
+  last state; `PlanePosition(id, fraction)` interpolates its world position between the two.
+
+`Markers` (static, the markers' math; camera space +X right, +Y up, looking along -Z; screen +Y
+down): `TeamColor(id)` (Allies green, Central red) and `ShapeOf(id)` (`Rounded` / `Sharp`, so the
+teams differ by shape too), `IsBehind` / `IsOnScreen` (in front and inside the screen),
+`EdgeDirection` / `EdgeAngle` (where to turn to see it, mirrored behind the camera so behind-left
+is left; straight behind is down), `EdgePoint` (on a circle of 40% of the screen height around
+the center) and `DistanceText` ("640 m", from 1000 m "1.2 km"; prebuilt, no allocations).
+
+Other messages for other planes are ignored (except in the kill feed). No allocations per Tick or per message.
 
 ## Godot (`Godot/Main.tscn`, `HudView.cs`)
 
@@ -56,6 +67,11 @@ panels anchored to the corners:
   engine, wings and tail are green / orange / red, crossed out when destroyed;
 - top right: the kill feed, newest on top, lines with the player on a gold-brown panel, fading
   out at the end of their 5 s;
+- under all the panels (`PlaneMarkers.cs`), for every other alive plane: on screen a small
+  downward triangle a fixed 30 px above it with its distance over it (outlined); off screen or
+  behind the camera an arrow on the 40%-of-height circle pointing where to turn. Allies green and
+  rounded, Central red and sharp. Projected with `GetViewport().GetCamera3D()`, positions
+  interpolated between ticks;
 - while the player is down: a red tint, a big centered "SHOT DOWN!" that pops in, and
   "Back in the air in N" under it.
 
@@ -63,10 +79,11 @@ Numbers come from a prebuilt string table, so `_Process` does not format or allo
 shell disables the module, the layer hides itself. Opened on its own (no module bound, as
 `screenshot.sh` does) it runs a preview with its own Core over a sky backdrop: a plane
 climbing, the guns heating up and overheating every 6 s, a balloon popping every 0.5 s, and
-every 10 s two kills, then the player's parts wearing down until shot down at 1.3 s and back 5 s later.
+six other planes around the player (three ahead with markers, three off screen; one more is down),
+with its own camera following the player, and every 10 s two kills, then the player's parts wearing down until shot down at 1.3 s and back 5 s later.
 
 Screenshots (not committed): `./screenshot.sh modules/HUD/Godot/Main.tscn` (`HUD.png`, shot
-down), damaged but flying `FRAMES=65 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-damage`, and,
+down), damaged but flying, with the plane markers, `FRAMES=65 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-damage`, and,
 overheated, `FRAMES=200 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-overheated`.
 
 ## Tests (`Tests/`)
@@ -74,6 +91,10 @@ overheated, `FRAMES=200 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-overheat
 `HudModuleTests` (with a fake bus): km/h conversion, altitude, other planes ignored, previous
 values for interpolation, heat and overheat, counting pops, part levels and the damage panel
 (plane 0 only), plane names and kill feed lines, the feed's 5 s and its limit, kills and deaths,
-the shot-down countdown to the respawn, publishes nothing, no allocations.
+the shot-down countdown to the respawn, markers only for other alive planes and their interpolated
+positions (no sweep on a respawn), publishes nothing, no allocations.
+
+`MarkersTests`: team colors and shapes, distance texts, on/off screen (outside the view, behind
+the camera), the edge direction and angle in front and behind, the 40% circle.
 
 Test it alone: `./test.sh HUD`.

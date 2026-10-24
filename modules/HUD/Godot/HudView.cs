@@ -54,6 +54,8 @@ public partial class HudView : CanvasLayer, IModuleView
     private int _previewCycle;
 
     private Control _root = null!;
+    private PlaneMarkers _markers = null!;
+    private Camera3D? _previewCamera;
     private Panel _flightPanel = null!;
     private Panel _popPanel = null!;
     private Label _speed = null!;
@@ -108,6 +110,16 @@ public partial class HudView : CanvasLayer, IModuleView
         if (_previewBus != null)
             _root.AddChild(Backdrop());
         AddChild(_root);
+
+        // Under every panel: the other planes' markers and off-screen arrows.
+        _markers = new PlaneMarkers { Hud = _hud, LabelFont = font, MouseFilter = Control.MouseFilterEnum.Ignore };
+        _root.AddChild(_markers);
+        if (_previewBus != null)
+        {
+            _previewCamera = new Camera3D { Near = 0.3f, Far = 8000f };
+            AddChild(_previewCamera);
+            _previewCamera.MakeCurrent();
+        }
 
         // Bottom left: speed, altitude, gun heat.
         _flightPanel = MakePanel(new Vector2(470f, 258f));
@@ -221,7 +233,29 @@ public partial class HudView : CanvasLayer, IModuleView
             _previewPops++;
         }
         PreviewCombat(t);
+        PreviewPlanes(t, position);
         _hud.Tick(new TickContext((long)(_previewTime * 60 + 0.5), delta));
+    }
+
+    // Preview: the other planes around the player. Ahead: an ally near left, an enemy at 640 m and
+    // one far off (km); off screen: an ally behind-left, an enemy behind-right and high, one to the
+    // right, one below; plane 3 is down (no marker).
+    private void PreviewPlanes(float t, System.Numerics.Vector3 player)
+    {
+        float w = 6f * Mathf.Sin(t * 0.9f);
+        PreviewPlane(1, player, -55f + w, -8f, -260f, true);
+        PreviewPlane(5, player, 120f, 50f + w, -625f, true);
+        PreviewPlane(6, player, -380f, 120f, -1550f + w, true);
+        PreviewPlane(2, player, -240f, 10f + w, 180f, true);
+        PreviewPlane(4, player, 150f + w, 220f, 300f, true);
+        PreviewPlane(7, player, 700f, -40f + w, -150f, true);
+        PreviewPlane(3, player, 0f, -60f, -200f, false);
+    }
+
+    private void PreviewPlane(int id, System.Numerics.Vector3 player, float x, float y, float z, bool alive)
+    {
+        var at = player + new System.Numerics.Vector3(x, y, z);
+        _previewBus!.Publish(new PlaneState(id, at, System.Numerics.Quaternion.Identity, new System.Numerics.Vector3(0f, 0f, -50f), 50f, 0.8f, alive));
     }
 
     // Preview, every 10 s: two kills in the feed, then the player shot down at 1.3 s (its parts
@@ -267,6 +301,12 @@ public partial class HudView : CanvasLayer, IModuleView
         float dt = (float)delta;
         _clock += dt;
         Layout();
+        if (_previewCamera != null)
+        {
+            // Preview chase camera: just behind and above the player, looking ahead.
+            var p = _hud.PlanePosition(HudModule.PlaneId, (float)Engine.GetPhysicsInterpolationFraction());
+            _previewCamera.GlobalPosition = new Vector3(p.X, p.Y + 2f, p.Z + 8f);
+        }
 
         float fraction = (float)Engine.GetPhysicsInterpolationFraction();
         int speed = Number(Mathf.Lerp(_hud.PreviousSpeedKmh, _hud.SpeedKmh, fraction));
@@ -401,6 +441,8 @@ public partial class HudView : CanvasLayer, IModuleView
         float scale = Mathf.Min(screen.X / Design.X, screen.Y / Design.Y);
         _root.Scale = new Vector2(scale, scale);
         _root.Size = screen / scale;
+        _markers.UiScale = scale;
+        _markers.Size = _root.Size;
         _popPanel.Position = new Vector2(Margin, Margin);
         _flightPanel.Position = new Vector2(Margin, _root.Size.Y - Margin - _flightPanel.Size.Y);
         _scorePanel.Position = new Vector2(Margin + _popPanel.Size.X + 20f, Margin);

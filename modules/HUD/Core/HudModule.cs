@@ -1,3 +1,4 @@
+using System.Numerics;
 using Neo.Damage;
 using Neo.Flight;
 using Neo.Guns;
@@ -58,6 +59,9 @@ public sealed class HudModule : IModule
     private readonly double[] _feedLeft = new double[KillFeedCapacity];
     private PlaneDamageState _damage = new(PlaneId, 1f, 1f, 1f, 1f, true);
     private PlaneState _plane;
+    private readonly PlaneState[] _latest = new PlaneState[Planes];
+    private readonly PlaneState[] _previous = new PlaneState[Planes];
+    private readonly bool[] _seen = new bool[Planes];
     private GunState _gun;
     private bool _sampled;
 
@@ -164,6 +168,25 @@ public sealed class HudModule : IModule
     /// <summary>Seconds kill feed line <paramref name="index"/> stays up (0..<see cref="KillFeedSeconds"/>).</summary>
     public double KillFeedSecondsLeft(int index) => _feedLeft[index];
 
+    /// <summary>
+    /// Plane <paramref name="planeId"/> gets a marker: another plane than the player's, seen in a
+    /// <see cref="PlaneState"/>, and alive in the last one.
+    /// </summary>
+    public bool HasMarker(int planeId) =>
+        planeId != PlaneId && planeId >= 0 && planeId < Planes && _seen[planeId] && _latest[planeId].Alive;
+
+    /// <summary>
+    /// Plane <paramref name="planeId"/>'s world position between its <see cref="PlaneState"/> before
+    /// the last (<paramref name="fraction"/> 0) and its last (1), like the Plane view interpolates.
+    /// Zero for a plane not seen yet.
+    /// </summary>
+    public Vector3 PlanePosition(int planeId, float fraction)
+    {
+        if (planeId < 0 || planeId >= Planes || !_seen[planeId])
+            return Vector3.Zero;
+        return Vector3.Lerp(_previous[planeId].Position, _latest[planeId].Position, fraction);
+    }
+
     /// <summary>"You", "Blue 1".."Blue 3", "Red 4".."Red 7"; other ids "Plane N".</summary>
     public static string PlaneName(int planeId) =>
         planeId >= 0 && planeId < Names.Length ? Names[planeId] : "Plane " + planeId;
@@ -219,6 +242,19 @@ public sealed class HudModule : IModule
             kept++;
         }
         KillFeedCount = kept;
+    }
+
+    // Each PlaneState (one per plane per tick): the last becomes the one before, except on the first
+    // and on a respawn, where there is nothing to sweep from.
+    private void Track(in PlaneState state)
+    {
+        int id = state.PlaneId;
+        if (id < 0 || id >= Planes)
+            return;
+        bool respawned = _seen[id] && state.Alive && !_latest[id].Alive;
+        _previous[id] = _seen[id] && !respawned ? _latest[id] : state;
+        _latest[id] = state;
+        _seen[id] = true;
     }
 
     private void OnPlaneDestroyed(in PlaneDestroyed message)
@@ -292,6 +328,7 @@ public sealed class HudModule : IModule
 
         public void Handle(in PlaneState message)
         {
+            _module.Track(in message);
             if (message.PlaneId != PlaneId)
                 return;
             _module._plane = message;

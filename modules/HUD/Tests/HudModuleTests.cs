@@ -256,6 +256,62 @@ public class HudModuleTests
         Assert.Equal(310f, hud.AltitudeMeters, 3);
     }
 
+    private static PlaneState At(int planeId, Vector3 position, bool alive = true) =>
+        new(planeId, position, Quaternion.Identity, new Vector3(0f, 0f, -50f), 50f, 0.8f, alive);
+
+    [Fact]
+    public void Markers_for_other_alive_planes_only()
+    {
+        var (hud, bus) = Started();
+        for (int id = 0; id < HudModule.Planes; id++)
+            Assert.False(hud.HasMarker(id));
+        bus.Send(At(0, Vector3.Zero));
+        bus.Send(At(2, new Vector3(100f, 0f, 0f)));
+        bus.Send(At(5, new Vector3(0f, 0f, -300f)));
+        bus.Send(At(6, new Vector3(0f, 0f, 300f), alive: false));
+        bus.Send(At(9, Vector3.Zero));
+        Assert.False(hud.HasMarker(0));
+        Assert.True(hud.HasMarker(2));
+        Assert.True(hud.HasMarker(5));
+        Assert.False(hud.HasMarker(6));
+        Assert.False(hud.HasMarker(3));
+        Assert.False(hud.HasMarker(9));
+        Assert.False(hud.HasMarker(-1));
+
+        bus.Send(At(5, new Vector3(0f, 0f, -300f), alive: false));
+        Assert.False(hud.HasMarker(5));
+        bus.Send(At(6, new Vector3(0f, 0f, 300f)));
+        Assert.True(hud.HasMarker(6));
+    }
+
+    [Fact]
+    public void Plane_positions_interpolate_between_the_last_two_states()
+    {
+        var (hud, bus) = Started();
+        Assert.Equal(Vector3.Zero, hud.PlanePosition(4, 0.5f));
+        bus.Send(At(4, new Vector3(0f, 100f, 0f)));
+        // First state: nothing before it.
+        Assert.Equal(new Vector3(0f, 100f, 0f), hud.PlanePosition(4, 0f));
+        bus.Send(At(4, new Vector3(10f, 100f, -20f)));
+        Assert.Equal(new Vector3(0f, 100f, 0f), hud.PlanePosition(4, 0f));
+        Assert.Equal(new Vector3(5f, 100f, -10f), hud.PlanePosition(4, 0.5f));
+        Assert.Equal(new Vector3(10f, 100f, -20f), hud.PlanePosition(4, 1f));
+        // The player too (to measure distances from).
+        bus.Send(At(0, new Vector3(1f, 2f, 3f)));
+        Assert.Equal(new Vector3(1f, 2f, 3f), hud.PlanePosition(0, 0.3f));
+    }
+
+    [Fact]
+    public void A_respawned_plane_does_not_sweep_from_where_it_went_down()
+    {
+        var (hud, bus) = Started();
+        bus.Send(At(3, new Vector3(500f, 0f, 0f)));
+        bus.Send(At(3, new Vector3(500f, 0f, 0f), alive: false));
+        bus.Send(At(3, new Vector3(0f, 300f, 0f)));
+        Assert.Equal(new Vector3(0f, 300f, 0f), hud.PlanePosition(3, 0f));
+        Assert.True(hud.HasMarker(3));
+    }
+
     [Fact]
     public void Heat_and_overheat_follow_the_last_gun_state()
     {
@@ -315,6 +371,7 @@ public class HudModuleTests
         var death = new PlaneDestroyed(0, 4);
         var back = new PlaneRespawn(0);
         var state = Plane(50f, 300f);
+        var other = At(5, new Vector3(0f, 300f, -400f));
         var heat = new GunState(0, 0.5f, false, true, 1);
         var pop = new TargetDestroyed(1, Vector3.Zero);
         for (int i = 0; i < 10; i++)
@@ -334,6 +391,9 @@ public class HudModuleTests
         for (int i = 0; i < 1000; i++)
         {
             plane.Handle(in state);
+            plane.Handle(in other);
+            _ = quiet.HasMarker(5);
+            _ = quiet.PlanePosition(5, 0.5f);
             gun.Handle(in heat);
             destroyed.Handle(in pop);
             damage.Handle(in parts);
