@@ -26,6 +26,12 @@ Plane names (the "Enemy Planes" wave): 0 is the player, "You"; 1-3 are "Blue <id
   `HasPlane` once a plane-0 `PlaneState` has arrived.
 - `Heat` (0..1) and `Overheated`: from the last plane-0 `GunState`.
 - `BalloonsPopped`: one per `TargetDestroyed` received since start.
+- Balloon-pop damage boost (plane 0's `GunState.BoostSecondsLeft`): `Boosted` while it is > 0,
+  `BoostSecondsLeft`, `BoostText` "DAMAGE +50%", `BoostCountdown` (whole seconds rounded up, 60 at the
+  pop, 1 in the last second) and `BoostCountdownText` "1:00".."0:42".."0:01" (`ClockText`, prebuilt;
+  empty when not boosted), `BoostPulsing` in the last 10 s (`BoostPulseSeconds`). When plane 0 pops
+  a balloon (`TargetDestroyed.ShooterPlaneId` 0): `BoostPopup` "+50% damage!" (`BoostPopupText`) for
+  1.5 s of Ticks (`BoostPopupSeconds`, `BoostPopupSecondsLeft`; a new pop restarts it).
 - Damage panel: `Engine`, `LeftWing`, `RightWing`, `Tail` (0..1, 1 before any state) from the
   last plane-0 `PlaneDamageState`; `Level(PlanePart)` / `LevelOf(health)` give the `PartLevel`:
   `Good` (green) from 0.6, `Worn` (orange) below 0.6, `Critical` (red) below 0.3, `Destroyed`
@@ -41,7 +47,9 @@ Plane names (the "Enemy Planes" wave): 0 is the player, "You"; 1-3 are "Blue <id
   goes down; cleared when a repair runs again); text `RepairCancelledText` "Repair cancelled".
   `ShowRepairHint` while alive, a part below 1 and no repair runs; text `RepairHintText`
   "Hold Y / R: repair".
-- Kill feed: one line per `PlaneDestroyed` (any plane), up to 6 (a 7th pushes out the oldest),
+- Kill feed: one line per `PlaneDestroyed` (any plane) and per `TargetDestroyed` with a
+  `ShooterPlaneId` 0-7 ("Red 5 popped a balloon", "You popped a balloon": `BalloonLine`; -1 shows
+  nothing; `KillFeedIsBalloon(i)`, victim -1), up to 6 (a 7th pushes out the oldest),
   each for 5 s of Ticks. `KillFeedCount`, `KillFeedText(i)` (0 the oldest),
   `KillFeedVictim/Shooter(i)`, `KillFeedSecondsLeft(i)`. Lines: "You shot down Red 5",
   "Red 4 shot you down", "Blue 2 shot down Red 6", "Red 5 went down" (downed itself); built once
@@ -70,7 +78,9 @@ panels anchored to the corners:
 
 - bottom left: SPEED (km/h) and ALT (m), interpolated between fixed ticks, and the GUNS heat
   bar: orange, warming towards red as it fills; while overheated it flashes red with
-  "OVERHEATED" on it;
+  "OVERHEATED" on it; just above it, while the player's boost runs, a red "DAMAGE +50%" badge with
+  its countdown "0:42", swelling and flashing orange in the last 10 s; when the player pops a
+  balloon, a big gold "+50% damage!" pops in above the badge, floats up and fades (1.5 s);
 - top left: a little balloon and "Balloons popped: N"; when N rises the number bounces and
   wiggles and a "+1" floats up; next to it "Kills N  Deaths N";
 - bottom, next to the flight panel: DAMAGE, a little plane from above (`DamageIcon.cs`) whose
@@ -79,7 +89,7 @@ panels anchored to the corners:
 - above the damage panel: while repairing, "REPAIRING <part>", "N more" and a green progress bar;
   after letting go mid-cycle, "Repair cancelled" in red (fading out at the end); else, while
   damaged, a small "Hold Y / R: repair" panel;
-- top right: the kill feed, newest on top, lines with the player on a gold-brown panel, fading
+- top right: the kill feed (kills and balloon pops), newest on top, lines with the player on a gold-brown panel, fading
   out at the end of their 5 s;
 - under all the panels (`PlaneMarkers.cs`), for every other alive plane: on screen a small
   downward triangle a fixed 30 px above it with its distance over it (outlined); off screen or
@@ -93,7 +103,8 @@ Numbers come from a prebuilt string table, so `_Process` does not format or allo
 shell disables the module, the layer hides itself. Opened on its own (no module bound, as
 `screenshot.sh` does) it runs a preview with its own Core over a sky backdrop: a plane
 climbing, the guns heating up and overheating every 6 s, a balloon popping every 0.5 s, and
-six other planes around the player (three ahead with markers, three off screen; one more is down),
+every 10 s Red 5 popping a balloon at 0.1 s and the player at 0.6 s every other cycle (its boost then
+runs 20 s instead of 60, so the pulse shows soon), six other planes around the player (three ahead with markers, three off screen; one more is down),
 with its own camera following the player, and every 10 s two kills, then the player's parts wearing down until shot down at 1.3 s and back 5 s later; at 6.6 s the
 engine and left wing are hit (the hint), at 7.1 s the engine is repaired (Repair held) and at 9.5 s
 let go ("Repair cancelled").
@@ -101,13 +112,16 @@ let go ("Repair cancelled").
 Screenshots (not committed): `./screenshot.sh modules/HUD/Godot/Main.tscn` (`HUD.png`, shot
 down), damaged but flying, with the plane markers, `FRAMES=65 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-damage`, and,
 overheated, `FRAMES=200 ./screenshot.sh modules/HUD/Godot/Main.tscn HUD-overheated`; repair:
-`FRAMES=415` (`HUD-repair-hint`), `FRAMES=520` (`HUD-repairing`), `FRAMES=580` (`HUD-repair-cancelled`).
+`FRAMES=415` (`HUD-repair-hint`), `FRAMES=520` (`HUD-repairing`), `FRAMES=580` (`HUD-repair-cancelled`); boost: `FRAMES=50` (`HUD-boost-popup`, the pop-up and the
+badge), `FRAMES=900` (`HUD-boost-pulse`, the last 10 s).
 
 ## Tests (`Tests/`)
 
 `HudModuleTests` (with a fake bus): km/h conversion, altitude, other planes ignored, previous
 values for interpolation, heat and overheat, counting pops, part levels and the damage panel
-(plane 0 only), plane names and kill feed lines, the feed's 5 s and its limit, kills and deaths,
+(plane 0 only), plane names and kill feed lines, the feed's 5 s and its limit, balloon pops in the feed (by anyone, none for -1),
+the boost badge (countdown texts, a whole 60 s boost tick by tick, the pulse in the last 10 s, plane
+0 only), the "+50% damage!" pop-up (only the player's pops, 1.5 s, restarted), kills and deaths,
 the shot-down countdown to the respawn, markers only for other alive planes and their interpolated
 positions (no sweep on a respawn), repair (part texts, progress, "N more", the hint only while
 damaged and not repairing or down, "Repair cancelled" for 1.5 s only on a mid-cycle release and

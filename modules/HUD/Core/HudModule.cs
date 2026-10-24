@@ -15,7 +15,9 @@ namespace Neo.HUD;
 /// Tick's values kept so the view can interpolate. From the Damage module: plane 0's part health
 /// (<see cref="PlaneDamageState"/>), the kill feed and plane 0's kills and deaths
 /// (<see cref="PlaneDestroyed"/>), and the "shot down" countdown until its
-/// <see cref="PlaneRespawn"/>, and plane 0's in-flight repair (<see cref="RepairState"/>). Publishes nothing; allocation-free (texts come from tables built once).
+/// <see cref="PlaneRespawn"/>, and plane 0's in-flight repair (<see cref="RepairState"/>). Plane 0's
+/// balloon-pop damage boost (<see cref="GunState.BoostSecondsLeft"/>), a "+50% damage!" pop-up when
+/// it pops one, and every known shooter's pop in the kill feed. Publishes nothing; allocation-free (texts come from tables built once).
 /// </summary>
 public sealed class HudModule : IModule
 {
@@ -51,12 +53,29 @@ public sealed class HudModule : IModule
     /// <summary>Shown while a part is damaged and no repair runs.</summary>
     public const string RepairHintText = "Hold Y / R: repair";
 
+    /// <summary>The boost badge's text while plane 0's balloon-pop boost runs.</summary>
+    public const string BoostText = "DAMAGE +50%";
+
+    /// <summary>The boost badge pulses in its last this many seconds.</summary>
+    public const float BoostPulseSeconds = 10f;
+
+    /// <summary>Seconds the "+50% damage!" pop-up stays up after the player pops a balloon.</summary>
+    public const double BoostPopupSeconds = 1.5;
+
+    /// <summary>The pop-up when the player pops a balloon.</summary>
+    public const string BoostPopupText = "+50% damage!";
+
+    /// <summary>Highest boost countdown shown, seconds ("9:59").</summary>
+    public const int MaxBoostCountdown = 599;
+
     private const int MaxCountdown = 9;
     private const int PartCount = 4;
 
     private static readonly string[] Names = BuildNames();
     private static readonly string[] KillLines = BuildKillLines();
     private static readonly string[] RespawnTexts = BuildRespawnTexts();
+    private static readonly string[] BalloonLines = BuildBalloonLines();
+    private static readonly string[] ClockTexts = BuildClockTexts();
     private static readonly string[] RepairingTexts = { "REPAIRING ENGINE", "REPAIRING LEFT WING", "REPAIRING RIGHT WING", "REPAIRING TAIL" };
     private static readonly string[] MoreTexts = { "", "1 more", "2 more", "3 more" };
 
@@ -71,6 +90,7 @@ public sealed class HudModule : IModule
     private readonly int[] _feedVictim = new int[KillFeedCapacity];
     private readonly int[] _feedShooter = new int[KillFeedCapacity];
     private readonly double[] _feedLeft = new double[KillFeedCapacity];
+    private readonly bool[] _feedBalloon = new bool[KillFeedCapacity];
     private PlaneDamageState _damage = new(PlaneId, 1f, 1f, 1f, 1f, true);
     private PlaneState _plane;
     private readonly PlaneState[] _latest = new PlaneState[Planes];
@@ -113,6 +133,40 @@ public sealed class HudModule : IModule
 
     /// <summary>Balloons popped since start: one per <see cref="TargetDestroyed"/>.</summary>
     public int BalloonsPopped { get; private set; }
+
+    /// <summary>Seconds left of plane 0's balloon-pop damage boost (last <see cref="GunState.BoostSecondsLeft"/>; 0 when none).</summary>
+    public float BoostSecondsLeft => _gun.BoostSecondsLeft > 0f ? _gun.BoostSecondsLeft : 0f;
+
+    /// <summary>Show the "DAMAGE +50%" badge: plane 0's boost runs.</summary>
+    public bool Boosted => _gun.BoostSecondsLeft > 0f;
+
+    /// <summary>The badge pulses: boosted, with <see cref="BoostPulseSeconds"/> or less left.</summary>
+    public bool BoostPulsing => Boosted && _gun.BoostSecondsLeft <= BoostPulseSeconds;
+
+    /// <summary>Whole seconds of the boost shown, rounded up (60 at the pop, 1 in the last second; 0 when none).</summary>
+    public int BoostCountdown
+    {
+        get
+        {
+            if (!Boosted)
+                return 0;
+            int n = (int)System.Math.Ceiling(_gun.BoostSecondsLeft - 1e-4f);
+            return n < 1 ? 1 : n > MaxBoostCountdown ? MaxBoostCountdown : n;
+        }
+    }
+
+    /// <summary>The boost countdown as "m:ss" ("1:00", "0:42", "0:05"); empty when not boosted. Prebuilt.</summary>
+    public string BoostCountdownText => Boosted ? ClockTexts[BoostCountdown] : string.Empty;
+
+    /// <summary>"+50% damage!" is up: the player popped a balloon less than <see cref="BoostPopupSeconds"/> ago (a new pop restarts it).</summary>
+    public bool BoostPopup => BoostPopupSecondsLeft > 0.0;
+
+    /// <summary>Seconds the "+50% damage!" pop-up stays up (0 when not shown).</summary>
+    public double BoostPopupSecondsLeft { get; private set; }
+
+    /// <summary>"m:ss" for <paramref name="seconds"/> (0..599 prebuilt, so no allocations for them).</summary>
+    public static string ClockText(int seconds) =>
+        seconds >= 0 && seconds <= MaxBoostCountdown ? ClockTexts[seconds] : BuildClockText(seconds);
 
     /// <summary>Plane 0's engine health, 0..1, from the last <see cref="PlaneDamageState"/> (1 before any).</summary>
     public float Engine => _damage.Engine;
@@ -205,13 +259,17 @@ public sealed class HudModule : IModule
     /// <summary>Kill feed lines shown now (at most <see cref="KillFeedCapacity"/>).</summary>
     public int KillFeedCount { get; private set; }
 
-    /// <summary>Kill feed line <paramref name="index"/>, 0 the oldest, e.g. "You shot down Red 5".</summary>
-    public string KillFeedText(int index) => KillLine(_feedVictim[index], _feedShooter[index]);
+    /// <summary>Kill feed line <paramref name="index"/>, 0 the oldest, e.g. "You shot down Red 5" or "Red 5 popped a balloon".</summary>
+    public string KillFeedText(int index) =>
+        _feedBalloon[index] ? BalloonLine(_feedShooter[index]) : KillLine(_feedVictim[index], _feedShooter[index]);
 
-    /// <summary>The plane that went down in kill feed line <paramref name="index"/>.</summary>
+    /// <summary>Kill feed line <paramref name="index"/> is a balloon pop (no victim plane).</summary>
+    public bool KillFeedIsBalloon(int index) => _feedBalloon[index];
+
+    /// <summary>The plane that went down in kill feed line <paramref name="index"/>; -1 for a balloon pop.</summary>
     public int KillFeedVictim(int index) => _feedVictim[index];
 
-    /// <summary>The plane that shot it down in kill feed line <paramref name="index"/>.</summary>
+    /// <summary>The plane that shot it down (or popped the balloon) in kill feed line <paramref name="index"/>.</summary>
     public int KillFeedShooter(int index) => _feedShooter[index];
 
     /// <summary>Seconds kill feed line <paramref name="index"/> stays up (0..<see cref="KillFeedSeconds"/>).</summary>
@@ -252,6 +310,10 @@ public sealed class HudModule : IModule
         return BuildKillLine(victim, shooter);
     }
 
+    /// <summary>The kill feed line for a balloon popped by <paramref name="shooter"/>: "Red 5 popped a balloon", "You popped a balloon". Prebuilt for ids 0-7.</summary>
+    public static string BalloonLine(int shooter) =>
+        shooter >= 0 && shooter < Planes ? BalloonLines[shooter] : BuildBalloonLine(shooter);
+
     public void Start(IMessageBus bus)
     {
         bus.Subscribe(_planeHandler);
@@ -281,6 +343,11 @@ public sealed class HudModule : IModule
             double left = RepairCancelledSecondsLeft - step;
             RepairCancelledSecondsLeft = left <= 1e-9 ? 0.0 : left;
         }
+        if (BoostPopupSecondsLeft > 0.0)
+        {
+            double left = BoostPopupSecondsLeft - step;
+            BoostPopupSecondsLeft = left <= 1e-9 ? 0.0 : left;
+        }
         if (PlayerDown)
             RespawnSecondsLeft = System.Math.Max(0.0, RespawnSecondsLeft - step);
 
@@ -294,6 +361,7 @@ public sealed class HudModule : IModule
             _feedVictim[kept] = _feedVictim[i];
             _feedShooter[kept] = _feedShooter[i];
             _feedLeft[kept] = left;
+            _feedBalloon[kept] = _feedBalloon[i];
             kept++;
         }
         KillFeedCount = kept;
@@ -341,7 +409,24 @@ public sealed class HudModule : IModule
             RepairCancelledSecondsLeft = 0.0;
             RespawnSecondsLeft = DamageLimits.RespawnSeconds;
         }
+        AddFeedLine(victim, shooter, false);
+    }
 
+    // A balloon popped: counted; with a known shooter it goes in the kill feed, and the player's own
+    // pop shows "+50% damage!".
+    private void OnTargetDestroyed(in TargetDestroyed message)
+    {
+        BalloonsPopped++;
+        int shooter = message.ShooterPlaneId;
+        if (shooter < 0)
+            return;
+        if (shooter == PlaneId)
+            BoostPopupSecondsLeft = BoostPopupSeconds;
+        AddFeedLine(-1, shooter, true);
+    }
+
+    private void AddFeedLine(int victim, int shooter, bool balloon)
+    {
         if (KillFeedCount == KillFeedCapacity)
         {
             for (int i = 1; i < KillFeedCapacity; i++)
@@ -349,12 +434,14 @@ public sealed class HudModule : IModule
                 _feedVictim[i - 1] = _feedVictim[i];
                 _feedShooter[i - 1] = _feedShooter[i];
                 _feedLeft[i - 1] = _feedLeft[i];
+                _feedBalloon[i - 1] = _feedBalloon[i];
             }
             KillFeedCount--;
         }
         _feedVictim[KillFeedCount] = victim;
         _feedShooter[KillFeedCount] = shooter;
         _feedLeft[KillFeedCount] = KillFeedSeconds;
+        _feedBalloon[KillFeedCount] = balloon;
         KillFeedCount++;
     }
 
@@ -383,6 +470,26 @@ public sealed class HudModule : IModule
             return PlaneName(shooter) + " shot you down";
         return PlaneName(shooter) + " shot down " + PlaneName(victim);
     }
+
+    private static string[] BuildBalloonLines()
+    {
+        var lines = new string[Planes];
+        for (int id = 0; id < Planes; id++)
+            lines[id] = BuildBalloonLine(id);
+        return lines;
+    }
+
+    private static string BuildBalloonLine(int shooter) => PlaneName(shooter) + " popped a balloon";
+
+    private static string[] BuildClockTexts()
+    {
+        var texts = new string[MaxBoostCountdown + 1];
+        for (int n = 0; n <= MaxBoostCountdown; n++)
+            texts[n] = BuildClockText(n);
+        return texts;
+    }
+
+    private static string BuildClockText(int seconds) => seconds / 60 + ":" + (seconds % 60).ToString("00");
 
     private static string[] BuildRespawnTexts()
     {
@@ -427,7 +534,7 @@ public sealed class HudModule : IModule
 
         public DestroyedHandler(HudModule module) => _module = module;
 
-        public void Handle(in TargetDestroyed message) => _module.BalloonsPopped++;
+        public void Handle(in TargetDestroyed message) => _module.OnTargetDestroyed(in message);
     }
 
     private sealed class DamageHandler : IMessageHandler<PlaneDamageState>

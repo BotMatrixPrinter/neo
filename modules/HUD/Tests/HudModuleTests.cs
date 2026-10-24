@@ -476,6 +476,165 @@ public class HudModuleTests
     }
 
     [Fact]
+    public void Pops_by_anyone_count_and_known_shooters_go_in_the_kill_feed()
+    {
+        var (hud, bus) = Started();
+        bus.Send(new TargetDestroyed(0, Vector3.Zero, 5));
+        bus.Send(new TargetDestroyed(1, Vector3.Zero, -1)); // unknown shooter: counted, no line
+        bus.Send(new TargetDestroyed(2, Vector3.Zero)); // the 2-argument constructor: -1 too
+        bus.Send(new TargetDestroyed(3, Vector3.Zero, 0));
+        bus.Send(new PlaneDestroyed(6, 2));
+        Assert.Equal(4, hud.BalloonsPopped);
+        Assert.Equal(3, hud.KillFeedCount);
+        Assert.Equal("Red 5 popped a balloon", hud.KillFeedText(0));
+        Assert.True(hud.KillFeedIsBalloon(0));
+        Assert.Equal(5, hud.KillFeedShooter(0));
+        Assert.Equal(-1, hud.KillFeedVictim(0));
+        Assert.Equal("You popped a balloon", hud.KillFeedText(1));
+        Assert.Equal(0, hud.KillFeedShooter(1));
+        Assert.Equal("Blue 2 shot down Red 6", hud.KillFeedText(2));
+        Assert.False(hud.KillFeedIsBalloon(2));
+        Assert.Equal(6, hud.KillFeedVictim(2));
+
+        // Balloon lines stay 5 s like the others and share the 6 lines.
+        for (int i = 0; i < 299; i++)
+            hud.Tick(OneStep);
+        Assert.Equal(3, hud.KillFeedCount);
+        hud.Tick(OneStep);
+        Assert.Equal(0, hud.KillFeedCount);
+        for (int i = 0; i < HudModule.KillFeedCapacity; i++)
+            bus.Send(new PlaneDestroyed(5, 0));
+        bus.Send(new TargetDestroyed(0, Vector3.Zero, 7));
+        Assert.Equal(HudModule.KillFeedCapacity, hud.KillFeedCount);
+        Assert.Equal("You shot down Red 5", hud.KillFeedText(0));
+        Assert.Equal("Red 7 popped a balloon", hud.KillFeedText(HudModule.KillFeedCapacity - 1));
+        Assert.True(hud.KillFeedIsBalloon(HudModule.KillFeedCapacity - 1));
+        Assert.False(hud.KillFeedIsBalloon(0));
+    }
+
+    [Theory]
+    [InlineData(0, "You popped a balloon")]
+    [InlineData(2, "Blue 2 popped a balloon")]
+    [InlineData(5, "Red 5 popped a balloon")]
+    [InlineData(7, "Red 7 popped a balloon")]
+    public void Balloon_lines(int shooter, string line) => Assert.Equal(line, HudModule.BalloonLine(shooter));
+
+    [Fact]
+    public void Boost_badge_follows_the_players_boost_seconds()
+    {
+        var (hud, bus) = Started();
+        Assert.Equal("DAMAGE +50%", HudModule.BoostText);
+        Assert.False(hud.Boosted);
+        Assert.Equal("", hud.BoostCountdownText);
+        Assert.Equal(0, hud.BoostCountdown);
+
+        bus.Send(new GunState(0, 0.2f, false, true, 10, 60f));
+        Assert.True(hud.Boosted);
+        Assert.Equal(60f, hud.BoostSecondsLeft);
+        Assert.Equal("1:00", hud.BoostCountdownText);
+        Assert.False(hud.BoostPulsing);
+
+        bus.Send(new GunState(0, 0.2f, false, true, 10, 41.5f));
+        Assert.Equal(42, hud.BoostCountdown);
+        Assert.Equal("0:42", hud.BoostCountdownText);
+        bus.Send(new GunState(0, 0.2f, false, true, 10, 42f));
+        Assert.Equal("0:42", hud.BoostCountdownText);
+        bus.Send(new GunState(0, 0.2f, false, true, 10, 10.01f));
+        Assert.Equal("0:11", hud.BoostCountdownText);
+        Assert.False(hud.BoostPulsing);
+
+        // The last 10 s pulse.
+        bus.Send(new GunState(0, 0.2f, false, true, 10, 10f));
+        Assert.True(hud.BoostPulsing);
+        Assert.Equal("0:10", hud.BoostCountdownText);
+        bus.Send(new GunState(0, 0.2f, false, true, 10, 1f / 60));
+        Assert.True(hud.BoostPulsing);
+        Assert.Equal("0:01", hud.BoostCountdownText);
+
+        // Another plane's boost is not the player's.
+        bus.Send(new GunState(4, 0f, false, false, 0, 30f));
+        Assert.Equal("0:01", hud.BoostCountdownText);
+
+        bus.Send(new GunState(0, 0.2f, false, true, 10, 0f));
+        Assert.False(hud.Boosted);
+        Assert.False(hud.BoostPulsing);
+        Assert.Equal(0f, hud.BoostSecondsLeft);
+        Assert.Equal("", hud.BoostCountdownText);
+
+        // The 5-argument constructor: no boost.
+        bus.Send(new GunState(0, 0.2f, false, true, 10));
+        Assert.False(hud.Boosted);
+    }
+
+    [Fact]
+    public void Boost_countdown_counts_down_a_whole_boost_by_ticks()
+    {
+        var (hud, bus) = Started();
+        // As Guns publishes it: 60 s at the pop, minus one step a tick.
+        string? last = null;
+        int changes = 0;
+        for (int tick = 0; tick < 3600; tick++)
+        {
+            bus.Send(new GunState(0, 0f, false, false, 0, (3600 - tick) / 60f));
+            hud.Tick(OneStep);
+            Assert.True(hud.Boosted);
+            Assert.Equal(tick >= 3000, hud.BoostPulsing);
+            if (hud.BoostCountdownText != last)
+            {
+                last = hud.BoostCountdownText;
+                changes++;
+            }
+            if (tick == 1080)
+                Assert.Equal("0:42", hud.BoostCountdownText);
+        }
+        Assert.Equal("0:01", last);
+        Assert.Equal(60, changes);
+        bus.Send(new GunState(0, 0f, false, false, 0, 0f));
+        Assert.False(hud.Boosted);
+    }
+
+    [Theory]
+    [InlineData(0, "0:00")]
+    [InlineData(5, "0:05")]
+    [InlineData(42, "0:42")]
+    [InlineData(60, "1:00")]
+    [InlineData(75, "1:15")]
+    public void Clock_texts(int seconds, string text) => Assert.Equal(text, HudModule.ClockText(seconds));
+
+    [Fact]
+    public void Players_pop_shows_the_damage_pop_up_for_a_moment()
+    {
+        var (hud, bus) = Started();
+        Assert.Equal("+50% damage!", HudModule.BoostPopupText);
+        Assert.False(hud.BoostPopup);
+
+        // Others' pops and unknown pops show no pop-up.
+        bus.Send(new TargetDestroyed(0, Vector3.Zero, 5));
+        bus.Send(new TargetDestroyed(1, Vector3.Zero, 2));
+        bus.Send(new TargetDestroyed(2, Vector3.Zero));
+        Assert.False(hud.BoostPopup);
+
+        bus.Send(new TargetDestroyed(3, Vector3.Zero, 0));
+        Assert.True(hud.BoostPopup);
+        Assert.Equal(HudModule.BoostPopupSeconds, hud.BoostPopupSecondsLeft);
+        int ticks = 0;
+        while (hud.BoostPopup)
+        {
+            hud.Tick(OneStep);
+            ticks++;
+        }
+        Assert.Equal((int)Math.Round(HudModule.BoostPopupSeconds * 60), ticks);
+        Assert.Equal(0.0, hud.BoostPopupSecondsLeft);
+
+        // A new pop restarts it.
+        bus.Send(new TargetDestroyed(3, Vector3.Zero, 0));
+        for (int i = 0; i < 60; i++)
+            hud.Tick(OneStep);
+        bus.Send(new TargetDestroyed(4, Vector3.Zero, 0));
+        Assert.Equal(HudModule.BoostPopupSeconds, hud.BoostPopupSecondsLeft);
+    }
+
+    [Fact]
     public void Publishes_nothing()
     {
         var (hud, bus) = Started();
@@ -512,6 +671,9 @@ public class HudModuleTests
         var other = At(5, new Vector3(0f, 300f, -400f));
         var heat = new GunState(0, 0.5f, false, true, 1);
         var pop = new TargetDestroyed(1, Vector3.Zero);
+        var mine = new TargetDestroyed(2, Vector3.Zero, 0);
+        var theirs = new TargetDestroyed(3, Vector3.Zero, 6);
+        var boosted = new GunState(0, 0.5f, false, true, 1, 9.5f);
         for (int i = 0; i < 10; i++)
         {
             plane.Handle(in state);
@@ -527,6 +689,11 @@ public class HudModuleTests
             repair.Handle(in repairing);
             _ = quiet.RepairText;
             _ = quiet.RepairMoreText;
+            destroyed.Handle(in mine);
+            destroyed.Handle(in theirs);
+            gun.Handle(in boosted);
+            _ = quiet.BoostCountdownText;
+            _ = quiet.KillFeedText(quiet.KillFeedCount - 1);
         }
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 1000; i++)
@@ -554,10 +721,18 @@ public class HudModuleTests
             _ = quiet.RepairProgress;
             _ = quiet.ShowRepairHint;
             _ = quiet.RepairCancelled;
+            destroyed.Handle(in mine);
+            _ = quiet.KillFeedText(quiet.KillFeedCount - 1);
+            destroyed.Handle(in theirs);
+            _ = quiet.KillFeedText(quiet.KillFeedCount - 1);
+            gun.Handle(in boosted);
+            _ = quiet.BoostCountdownText;
+            _ = quiet.BoostPulsing;
+            _ = quiet.BoostPopup;
             quiet.Tick(OneStep);
         }
         Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
-        Assert.Equal(1010, quiet.BalloonsPopped);
+        Assert.Equal(3030, quiet.BalloonsPopped);
         Assert.Equal(1010, quiet.Kills);
         Assert.Equal(1010, quiet.Deaths);
     }

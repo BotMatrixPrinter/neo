@@ -10,7 +10,9 @@ namespace Neo.HUD;
 /// <summary>
 /// Godot side of the HUD module: dark rounded panels with a gold edge and bold outlined text.
 /// Bottom left: speed (km/h) and altitude (m), interpolated between fixed ticks, and the gun-heat
-/// bar (orange; flashing red with "OVERHEATED" while overheated). Top left: "Balloons popped: N",
+/// bar (orange; flashing red with "OVERHEATED" while overheated); above it, while the player's
+/// balloon-pop boost runs, a "DAMAGE +50%" badge with its countdown (pulsing in the last 10 s), and
+/// a short "+50% damage!" pop-up when the player pops a balloon. Top left: "Balloons popped: N",
 /// whose number pops when it rises, and the player's kills / deaths. Next to the flight panel: the
 /// damage panel, a plane icon colored by the player's part health; above it the repair panel
 /// ("REPAIRING <part>", a progress bar and "N more", the part highlighted on the icon), a short
@@ -41,6 +43,11 @@ public partial class HudView : CanvasLayer, IModuleView
     private static readonly Color FeedFill = new(0.11f, 0.1f, 0.13f, 0.82f);
     private static readonly Color FeedMine = new(0.32f, 0.2f, 0.05f, 0.9f);
     private static readonly Color RepairGreen = new(0.42f, 0.86f, 0.32f);
+    private static readonly Color BoostFill = new(0.62f, 0.11f, 0.06f, 0.94f);
+    private static readonly Color BoostFlash = new(0.95f, 0.36f, 0.1f, 0.96f);
+
+    private const float BoostWidth = 470f;
+    private const float BoostHeight = 78f;
 
     private const float RepairWidth = 480f;
     private const float RepairHeight = 120f;
@@ -95,6 +102,11 @@ public partial class HudView : CanvasLayer, IModuleView
     private Label _downCountdown = null!;
     private string? _downShown;
     private float _downAge;
+    private Panel _boostPanel = null!;
+    private StyleBoxFlat _boostStyle = null!;
+    private Label _boostCountdown = null!;
+    private string? _boostShown;
+    private Label _boostPopup = null!;
     private Label _overheated = null!;
     private Panel _heatFill = null!;
     private StyleBoxFlat _heatStyle = null!;
@@ -163,6 +175,22 @@ public partial class HudView : CanvasLayer, IModuleView
         _overheated.LabelSettings.OutlineSize = 10;
         _overheated.Visible = false;
         track.AddChild(_overheated);
+
+        // Just above the flight panel (by the heat bar): the balloon-pop damage boost and its countdown.
+        _boostPanel = new Panel { Size = new Vector2(BoostWidth, BoostHeight), PivotOffset = new Vector2(BoostWidth * 0.5f, BoostHeight * 0.5f), MouseFilter = Control.MouseFilterEnum.Ignore, Visible = false };
+        _boostStyle = Box(BoostFill, Gold, 5, 24, 10);
+        _boostStyle.ShadowOffset = new Vector2(0f, 6f);
+        _boostPanel.AddThemeStyleboxOverride("panel", _boostStyle);
+        _root.AddChild(_boostPanel);
+        _boostPanel.AddChild(MakeLabel(HudModule.BoostText, font, 40, Gold, new Vector2(26f, 0f), new Vector2(300f, BoostHeight), HorizontalAlignment.Left));
+        _boostCountdown = MakeLabel("", font, 44, Cream, new Vector2(310f, 0f), new Vector2(136f, BoostHeight), HorizontalAlignment.Right);
+        _boostPanel.AddChild(_boostCountdown);
+        // Above it, when the player pops a balloon: "+50% damage!" popping in and floating up.
+        _boostPopup = MakeLabel(HudModule.BoostPopupText, font, 60, Gold, Vector2.Zero, new Vector2(BoostWidth, 90f), HorizontalAlignment.Center);
+        _boostPopup.LabelSettings.OutlineSize = 16;
+        _boostPopup.PivotOffset = new Vector2(BoostWidth * 0.5f, 45f);
+        _boostPopup.Visible = false;
+        _root.AddChild(_boostPopup);
 
         // Top left: balloons popped, with a little balloon.
         _popPanel = MakePanel(new Vector2(500f, 100f));
@@ -268,7 +296,7 @@ public partial class HudView : CanvasLayer, IModuleView
         // Guns: heat up over 2.6 s, overheat for 2 s, cool, repeat every 6 s.
         float cycle = t % 6f;
         float heat = cycle < 2.6f ? cycle / 2.6f : cycle < 4.6f ? 1f : Mathf.Max(0f, 1f - (cycle - 4.6f) / 1.4f);
-        _previewBus.Publish(new GunState(0, heat, cycle >= 2.6f && cycle < 4.6f, cycle < 2.6f, (int)(t * 20f)));
+        _previewBus.Publish(new GunState(0, heat, cycle >= 2.6f && cycle < 4.6f, cycle < 2.6f, (int)(t * 20f), PreviewBoost(t)));
         // A balloon pops every half second from 0.4 s.
         while (_previewPops < (int)((t - 0.4f) / 0.5f) + 1 && t >= 0.4f)
         {
@@ -278,6 +306,14 @@ public partial class HudView : CanvasLayer, IModuleView
         PreviewCombat(t);
         PreviewPlanes(t, position);
         _hud.Tick(new TickContext((long)(_previewTime * 60 + 0.5), delta));
+    }
+
+    // Preview: the player pops a balloon at 0.6 s every 20 s; its boost then runs 20 s (60 in the game,
+    // shortened so the last 10 s pulse soon).
+    private static float PreviewBoost(float t)
+    {
+        float since = t % 20f - 0.6f;
+        return since < 0f ? 0f : Mathf.Max(0f, 20f - since);
     }
 
     // Preview: the other planes around the player. Ahead: an ally near left, an enemy at 640 m and
@@ -314,29 +350,41 @@ public partial class HudView : CanvasLayer, IModuleView
             _previewEvent = 0;
         }
         float c = t - cycle * 10f;
-        if (_previewEvent == 0 && c >= 0.3f)
+        // Balloon pops in the feed: Red 5 at 0.1 s, and the player at 0.6 s every other cycle.
+        if (_previewEvent == 0 && c >= 0.1f)
+        {
+            _previewBus!.Publish(new TargetDestroyed(4, System.Numerics.Vector3.Zero, 5));
+            _previewEvent++;
+        }
+        if (_previewEvent == 1 && c >= 0.3f)
         {
             _previewBus!.Publish(new PlaneDestroyed(5, 0));
             _previewEvent++;
         }
-        if (_previewEvent == 1 && c >= 0.8f)
+        if (_previewEvent == 2 && c >= 0.6f)
+        {
+            if (cycle % 2 == 0)
+                _previewBus!.Publish(new TargetDestroyed(3, System.Numerics.Vector3.Zero, 0));
+            _previewEvent++;
+        }
+        if (_previewEvent == 3 && c >= 0.8f)
         {
             _previewBus!.Publish(new PlaneDestroyed(6, 2));
             _previewEvent++;
         }
-        if (_previewEvent == 2 && c >= 1.3f)
+        if (_previewEvent == 4 && c >= 1.3f)
         {
             _previewBus!.Publish(new PlaneDestroyed(0, 4));
             _previewEvent++;
         }
-        if (_previewEvent == 3 && c >= 6.3f)
+        if (_previewEvent == 5 && c >= 6.3f)
         {
             _previewBus!.Publish(new PlaneRespawn(0));
             _previewEvent++;
         }
-        bool down = _previewEvent == 3;
-        float k = _previewEvent >= 4 ? 0f : Mathf.Min(c / 1.3f, 1f);
-        bool hit = _previewEvent >= 4 && c >= 6.6f;
+        bool down = _previewEvent == 5;
+        float k = _previewEvent >= 6 ? 0f : Mathf.Min(c / 1.3f, 1f);
+        bool hit = _previewEvent >= 6 && c >= 6.6f;
         float engine = hit ? 0.35f : 1f - 0.3f * k;
         float leftWing = hit ? 0.7f : 1f - 0.5f * k;
         _previewBus!.Publish(new PlaneDamageState(0, engine, leftWing, 1f - 0.8f * k, 1f - k, !down));
@@ -388,6 +436,50 @@ public partial class HudView : CanvasLayer, IModuleView
         {
             _heatStyle.BgColor = HeatOrange.Lerp(HeatHot, heat * heat);
             _overheated.Visible = false;
+        }
+
+        // Boost badge: the countdown; in the last 10 s it pulses (swells and flashes).
+        if (_hud.Boosted)
+        {
+            string countdown = _hud.BoostCountdownText;
+            if (!ReferenceEquals(countdown, _boostShown))
+            {
+                _boostShown = countdown;
+                _boostCountdown.Text = countdown;
+            }
+            if (_hud.BoostPulsing)
+            {
+                float pulse = 0.5f + 0.5f * Mathf.Sin(_clock * 9f);
+                float swell = 1f + 0.07f * pulse;
+                _boostPanel.Scale = new Vector2(swell, swell);
+                _boostStyle.BgColor = BoostFill.Lerp(BoostFlash, pulse);
+            }
+            else
+            {
+                _boostPanel.Scale = Vector2.One;
+                _boostStyle.BgColor = BoostFill;
+            }
+            _boostPanel.Visible = true;
+        }
+        else if (_boostPanel.Visible)
+        {
+            _boostPanel.Visible = false;
+        }
+
+        // "+50% damage!": pops in big, floats up and fades out at the end.
+        if (_hud.BoostPopup)
+        {
+            float age = (float)(HudModule.BoostPopupSeconds - _hud.BoostPopupSecondsLeft);
+            float k = Mathf.Clamp(age / 0.4f, 0f, 1f);
+            float scale = 1f + 0.8f * Mathf.Exp(-6f * k) * Mathf.Cos(k * 9f) * (1f - k);
+            _boostPopup.Scale = new Vector2(scale, scale);
+            _boostPopup.Position = new Vector2(_boostPanel.Position.X, _boostPanel.Position.Y - 100f - 30f * age);
+            _boostPopup.Modulate = new Color(1f, 1f, 1f, Mathf.Clamp((float)_hud.BoostPopupSecondsLeft / 0.4f, 0f, 1f));
+            _boostPopup.Visible = true;
+        }
+        else if (_boostPopup.Visible)
+        {
+            _boostPopup.Visible = false;
         }
 
         // Balloons popped: the number jumps and a "+1" floats up when it rises.
@@ -541,6 +633,7 @@ public partial class HudView : CanvasLayer, IModuleView
         _popPanel.Position = new Vector2(Margin, Margin);
         _flightPanel.Position = new Vector2(Margin, _root.Size.Y - Margin - _flightPanel.Size.Y);
         _scorePanel.Position = new Vector2(Margin + _popPanel.Size.X + 20f, Margin);
+        _boostPanel.Position = new Vector2(Margin, _flightPanel.Position.Y - 16f - BoostHeight);
         _damagePanel.Position = new Vector2(Margin + _flightPanel.Size.X + 20f, _flightPanel.Position.Y);
         _repairPanel.Position = new Vector2(_damagePanel.Position.X, _damagePanel.Position.Y - 20f - RepairHeight);
         _hintPanel.Position = new Vector2(_damagePanel.Position.X, _damagePanel.Position.Y - 20f - HintHeight);
