@@ -8,7 +8,7 @@ namespace Neo.Plane;
 /// One drawn plane (made by <see cref="PlaneView"/> for each plane id): its model, toon
 /// shaded with an ink outline, its propeller, its exhaust trail and its damage looks
 /// (<see cref="PlaneLook"/>): dark engine smoke, tattered wings with a little smoke, fire and
-/// thick smoke while falling, an explosion puff where it hits the ground, hidden until it
+/// thick smoke while falling, an explosion puff where it hits the ground (a splash on water), hidden until it
 /// respawns. Placed each frame by <see cref="Show"/>; no rules here.
 /// </summary>
 public partial class PlaneVisual : Node3D
@@ -47,6 +47,9 @@ public partial class PlaneVisual : Node3D
     private Node3D _explosion = null!;
     private CpuParticles3D _blast = null!;
     private CpuParticles3D _blastSmoke = null!;
+    private Node3D _splash = null!;
+    private CpuParticles3D _spray = null!;
+    private CpuParticles3D _foam = null!;
     private long _crashesSeen;
     private double _time;
 
@@ -104,6 +107,8 @@ public partial class PlaneVisual : Node3D
 
         _explosion = MakeExplosion(puff, out _blast, out _blastSmoke);
         AddChild(_explosion);
+        _splash = MakeSplash(puff, out _spray, out _foam);
+        AddChild(_splash);
         Visible = false;
     }
 
@@ -112,7 +117,7 @@ public partial class PlaneVisual : Node3D
     /// <paramref name="latest"/> by <paramref name="fraction"/>, with its damage and life.
     /// </summary>
     public void Show(in Neo.Flight.PlaneState previous, in Neo.Flight.PlaneState latest, float fraction,
-        in PlaneDamageState damage, PlaneLife life, long crashes, double delta)
+        in PlaneDamageState damage, PlaneLife life, long crashes, CrashLook crashLook, System.Numerics.Vector3 crashPoint, double delta)
     {
         _time += delta;
         var from = new Transform3D(new Basis(ToGodot(previous.Orientation)), ToGodot(previous.Position));
@@ -127,10 +132,22 @@ public partial class PlaneVisual : Node3D
         if (crashes != _crashesSeen)
         {
             _crashesSeen = crashes;
-            // A cartoon puff where it hit: fire and smoke, left in the world.
-            _explosion.GlobalTransform = new Transform3D(Basis.Identity, GlobalPosition + new Vector3(0f, 1.5f, 0f));
-            _blast.Restart();
-            _blastSmoke.Restart();
+            // Where it hit, on the ground or the water (Core's crash point), left in the world:
+            // a cartoon puff of fire and smoke on land, a splash on water.
+            var parent = GetParent() as Node3D;
+            var hit = (parent?.GlobalTransform ?? Transform3D.Identity) * ToGodot(crashPoint);
+            if (crashLook == CrashLook.Splash)
+            {
+                _splash.GlobalTransform = new Transform3D(Basis.Identity, hit + new Vector3(0f, 0.3f, 0f));
+                _spray.Restart();
+                _foam.Restart();
+            }
+            else
+            {
+                _explosion.GlobalTransform = new Transform3D(Basis.Identity, hit + new Vector3(0f, 1.5f, 0f));
+                _blast.Restart();
+                _blastSmoke.Restart();
+            }
         }
 
         SetEmitting(_trail, life == PlaneLife.Flying);
@@ -263,6 +280,37 @@ public partial class PlaneVisual : Node3D
         smoke.Gravity = new Vector3(0f, 1.5f, 0f);
         root.AddChild(blast);
         root.AddChild(smoke);
+        return root;
+    }
+
+    // The water crash: a tall burst of white spray thrown up and falling back, then a ring of foam
+    // spreading flat over the water. One shot each, restarted per crash; no fire.
+    private static Node3D MakeSplash(Texture2D puff, out CpuParticles3D spray, out CpuParticles3D foam)
+    {
+        var root = new Node3D { Name = "Splash", TopLevel = true };
+        spray = Particles("Spray", puff, 70, 1.6, new Color(0.95f, 0.98f, 1f, 0.95f), new Color(0.75f, 0.88f, 1f, 0f), additive: false, size: 3.2f);
+        spray.OneShot = true;
+        spray.Explosiveness = 0.95f;
+        spray.Spread = 22f;
+        spray.Direction = Vector3.Up;
+        spray.InitialVelocityMin = 10f;
+        spray.InitialVelocityMax = 22f;
+        spray.Gravity = new Vector3(0f, -18f, 0f);
+        spray.DampingMin = 0.5f;
+        spray.DampingMax = 1.5f;
+        foam = Particles("Foam", puff, 36, 2.4, new Color(1f, 1f, 1f, 0.9f), new Color(0.85f, 0.93f, 1f, 0f), additive: false, size: 5f);
+        foam.OneShot = true;
+        foam.Explosiveness = 1f;
+        foam.Spread = 180f;
+        foam.Direction = Vector3.Right;
+        foam.Flatness = 1f; // out across the water, not up
+        foam.InitialVelocityMin = 5f;
+        foam.InitialVelocityMax = 8f;
+        foam.Gravity = Vector3.Zero;
+        foam.DampingMin = 3f;
+        foam.DampingMax = 4f;
+        root.AddChild(spray);
+        root.AddChild(foam);
         return root;
     }
 

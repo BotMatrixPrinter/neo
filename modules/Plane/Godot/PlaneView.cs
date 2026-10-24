@@ -69,7 +69,8 @@ public partial class PlaneView : Node3D, IModuleView
             var previous = _plane.PreviousOf(id);
             var latest = _plane.LatestOf(id);
             var damage = _plane.DamageOf(id);
-            visual.Show(in previous, in latest, f, in damage, _plane.LifeOf(id), _plane.CrashesOf(id), delta);
+            visual.Show(in previous, in latest, f, in damage, _plane.LifeOf(id), _plane.CrashesOf(id),
+                _plane.CrashLookOf(id), _plane.CrashPointOf(id), delta);
         }
 
         var player = _visuals[PlaneModule.PlayerId];

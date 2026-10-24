@@ -208,8 +208,45 @@ public class PlaneModuleTests
         Assert.Equal(1, plane.CrashesOf(2));
     }
 
-    private static PlaneState At(int id, float height, bool alive, float speed = 50f, float x = 0f) =>
-        new(id, new Vector3(x, height, 0f), Quaternion.Identity, new Vector3(0, 0, -speed), speed, 0.5f, alive);
+    [Fact]
+    public void CrashOnAHillExplodesOnItsSlope()
+    {
+        var (plane, bus) = Started();
+        float ground = Neo.World.Terrain.HeightAt(1350f, 150f);
+        bus.Send(At(5, ground + 300f, true, x: 1350f, z: 150f));
+        bus.Send(At(5, ground + 30f, false, x: 1350f, z: 150f));
+        Assert.Equal(PlaneLife.Falling, plane.LifeOf(5));
+        bus.Send(At(5, ground + 0.4f, false, x: 1350f, z: 150f)); // far above GroundY
+        Assert.Equal(PlaneLife.Crashed, plane.LifeOf(5));
+        Assert.Equal(1, plane.CrashesOf(5));
+        Assert.Equal(CrashLook.Explosion, plane.CrashLookOf(5));
+        Assert.Equal(new Vector3(1350f, ground, 150f), plane.CrashPointOf(5));
+        // Flight drags the wreck on into the hill: the crash stays where it hit.
+        bus.Send(At(5, ground - 20f, false, x: 1351f, z: 150f));
+        Assert.Equal(1, plane.CrashesOf(5));
+        Assert.Equal(new Vector3(1350f, ground, 150f), plane.CrashPointOf(5));
+    }
+
+    [Fact]
+    public void CrashOnWaterSplashesThenOnLandExplodes()
+    {
+        var (plane, bus) = Started();
+        float river = Neo.World.Terrain.RiverX(0f);
+        bus.Send(At(6, 300f, true, x: river));
+        bus.Send(At(6, 0.3f, false, x: river));
+        Assert.Equal(PlaneLife.Crashed, plane.LifeOf(6));
+        Assert.Equal(CrashLook.Splash, plane.CrashLookOf(6));
+        Assert.Equal(new Vector3(river, Neo.World.Terrain.WaterLevel, 0f), plane.CrashPointOf(6));
+
+        bus.Send(At(6, 500f, true));
+        bus.Send(At(6, 0f, false));
+        Assert.Equal(2, plane.CrashesOf(6));
+        Assert.Equal(CrashLook.Explosion, plane.CrashLookOf(6));
+        Assert.Equal(Neo.World.Terrain.HeightAt(0f, 0f), plane.CrashPointOf(6).Y);
+    }
+
+    private static PlaneState At(int id, float height, bool alive, float speed = 50f, float x = 0f, float z = 0f) =>
+        new(id, new Vector3(x, height, z), Quaternion.Identity, new Vector3(0, 0, -speed), speed, 0.5f, alive);
 
     [Fact]
     public void PublishesNothing()

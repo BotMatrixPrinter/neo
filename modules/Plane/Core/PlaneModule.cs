@@ -1,3 +1,4 @@
+using System.Numerics;
 using Neo.Damage;
 using Neo.Flight;
 using Neo.Shell;
@@ -67,6 +68,12 @@ public sealed class PlaneModule : IModule
     /// <summary>Times <paramref name="planeId"/> hit the ground (became <see cref="PlaneLife.Crashed"/>): the view puffs an explosion at each.</summary>
     public long CrashesOf(int planeId) => InRange(planeId) ? _tracks[planeId].Crashes : 0;
 
+    /// <summary>How the last crash of <paramref name="planeId"/> shows (<see cref="PlaneLook.CrashAt"/>): an explosion on land, a splash on water.</summary>
+    public CrashLook CrashLookOf(int planeId) => InRange(planeId) ? _tracks[planeId].CrashLook : CrashLook.Explosion;
+
+    /// <summary>Where the last crash of <paramref name="planeId"/> shows: on the ground or water surface (<see cref="PlaneLook.CrashPoint"/>).</summary>
+    public Vector3 CrashPointOf(int planeId) => InRange(planeId) ? _tracks[planeId].CrashPoint : default;
+
     /// <summary>True once a state of the player's plane has arrived.</summary>
     public bool HasState => Has(PlayerId);
 
@@ -121,9 +128,14 @@ public sealed class PlaneModule : IModule
     private static void UpdateLife(ref Track track)
     {
         bool alive = track.Latest.Alive && (!track.HasDamage || track.Damage.Alive);
-        var life = PlaneLook.Life(alive, track.Latest.Position.Y, track.Latest.Speed);
+        var position = track.Latest.Position;
+        var life = PlaneLook.Life(alive, position, track.Latest.Speed);
         if (life == PlaneLife.Crashed && track.Life != PlaneLife.Crashed)
+        {
             track.Crashes++;
+            track.CrashLook = PlaneLook.CrashAt(position.X, position.Z);
+            track.CrashPoint = PlaneLook.CrashPoint(position);
+        }
         track.Life = life;
     }
 
@@ -137,6 +149,8 @@ public sealed class PlaneModule : IModule
         public PlaneDamageState Damage;
         public PlaneLife Life;
         public long Crashes;
+        public CrashLook CrashLook;
+        public Vector3 CrashPoint;
     }
 
     private sealed class StateHandler : IMessageHandler<PlaneState>

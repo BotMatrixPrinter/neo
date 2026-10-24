@@ -9,7 +9,7 @@ showing its damage.
 Publishes nothing; its Contract (`Contract/`, namespace `Neo.Plane`) is empty for now.
 Subscribes to `Neo.Flight.PlaneState` (modules/Flight/Contract) and `Neo.Damage.PlaneDamageState`
 (modules/Damage/Contract), for every plane id 0..63 (`MaxPlanes`, Damage's `MaxPlanes`);
-other ids are ignored. Uses `Neo.Flight.Teams` and `Neo.World.WorldBounds.GroundY`.
+other ids are ignored. Uses `Neo.Flight.Teams` and `Neo.World.Terrain` (`HeightAt`, `IsWater`).
 
 ## Core (`Core/`)
 
@@ -18,7 +18,9 @@ the order they first came) keeps the latest state (`LatestOf(id)`), the one befo
 (`PreviousOf(id)`, equal to the latest after the first one and after a respawn, so the view
 never slides a plane from its wreck to its start point), `Has(id)` and `UpdatesOf(id)`; its
 latest `PlaneDamageState` (`HasDamage(id)`, `DamageOf(id)`: undamaged and alive until one
-comes); its life `LifeOf(id)` and `CrashesOf(id)` (times it hit the ground). `HasState`,
+comes); its life `LifeOf(id)` and `CrashesOf(id)` (times it hit the ground), and of its last
+crash `CrashLookOf(id)` (`CrashLook.Explosion` on land, `Splash` on water) and `CrashPointOf(id)`
+(on the ground or water surface under where it hit; it stays there while Flight moves the wreck). `HasState`,
 `Latest`, `Previous` and `Updates` read the player's plane (id 0). A plane is down when Flight
 (`PlaneState.Alive`) or Damage (`PlaneDamageState.Alive`) says so, so it stays down until
 Flight has put it back at its start. No allocations per Tick or per message.
@@ -30,8 +32,11 @@ Flight has put it back at its start. No allocations per Tick or per message.
   NaN counts as healthy). `EngineSmoke(engine)`: 0 at or above it, 0.3 just below, thicker
   as it gets worse, 1 at health 0. `WingSmoke(wing)`: a little smoke, up to 0.35.
   `Holes(wing)`: holes and torn canvas, 2 just below the threshold up to 6 at 0.
-- `Life(alive, height, speed)` (`PlaneLife`): `Flying` while alive; downed, `Falling` until
-  within 1 m of the ground or stopped (under 0.5 m/s), then `Crashed`.
+- `Life(alive, position, speed)` (`PlaneLife`): `Flying` while alive; downed, `Falling` until
+  within 1 m of the ground under it (`Terrain.HeightAt(x, z)`: the plain, a hill, a mountain or
+  the water's surface; or below it) or stopped (under 0.5 m/s), then `Crashed`.
+- `CrashAt(x, z)`: `CrashLook.Splash` on the river or a lake (`Terrain.IsWater`), else
+  `Explosion`; `CrashPoint(position)`: the point on the ground or water right under or over it.
 
 `PropellerLook` (static, plain functions the view applies): how the propeller is drawn. A
 real prop is far too fast to draw: a two-blade prop at its true 6 to 30 rev/s turns half a
@@ -91,8 +96,10 @@ world-space CPU particles:
   top wing's canvas (every other one with a torn flap of canvas fluttering) and trails a
   little grey smoke (`WingSmoke`).
 - Falling: fire at the engine and the thickest dark smoke.
-- Crashed: a cartoon explosion puff (a burst of fire, then a rising cloud of smoke) where it
-  hit, once per crash; the plane is hidden until it respawns (its smoke drifts away).
+- Crashed: at its `CrashPointOf`, once per crash, on land a cartoon explosion puff (a burst of
+  fire, then a rising cloud of smoke), on water a cartoon splash (a tall burst of white spray
+  falling back, then a ring of foam spreading over the water, no fire); the plane is hidden
+  until it respawns (its smoke drifts away).
 Dark smoke uses `Smoke.gdshader` (blended over, billboarded), which drops particle slots
 not yet spawned so they never show as black squares; light smoke and fire are additive.
 
@@ -110,10 +117,13 @@ Screenshot (not committed): `./screenshot.sh modules/Plane/Godot/Main.tscn` (`Pl
 plane 0 (every field) and the previous one for interpolation, keeps states for all 8 plane
 ids apart (ids in first-seen order), ignores ids out of range, keeps each plane's damage,
 a downed plane falls, crashes once on the ground, stays down until Flight respawns it and
-then does not slide from the wreck, Flight alone can down a plane, publishes nothing, no
+then does not slide from the wreck, Flight alone can down a plane, a crash on a hill explodes
+on its slope (far above GroundY) and stays there, a crash on the river splashes on its surface
+and the next on land explodes, publishes nothing, no
 allocations, one entry class. `PlaneLookTests`: team picks the model, no damage looks at or
 above half health, engine smoke below half and thicker when worse, wing holes and a little
-smoke below half, flying/falling/crashed, both .glb models have their body, `Propeller`,
+smoke below half, flying/falling/crashed on flat ground (the plain, above GroundY), crashed on
+a hill's slope not inside it, a splash on water (at its surface), both .glb models have their body, `Propeller`,
 `Exhaust` and mirrored wing markers, and the same span. `PropellerLookTests`: the blades
 never turn more than a sixth of a turn per frame at any frame rate, throttle or hitch; they
 turn clearly at idle and faster with throttle; no disc and solid blades near idle; the disc

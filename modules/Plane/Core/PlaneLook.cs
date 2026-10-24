@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 using Neo.Flight;
 using Neo.World;
 
@@ -17,7 +18,7 @@ public enum PlaneModel
 /// <summary>
 /// How a plane looks, as plain functions (the view applies them): which model a plane id
 /// gets, how its damage shows (from <c>Neo.Damage.PlaneDamageState</c> part health, 0..1)
-/// and when a downed plane is on the ground.
+/// and when and how a downed plane hits the ground (<see cref="Terrain"/>: hills, mountains, water).
 /// </summary>
 public static class PlaneLook
 {
@@ -72,14 +73,23 @@ public static class PlaneLook
         IsDamaged(wing) ? 2 + (int)MathF.Round((MaxHoles - 2) * Severity(wing)) : 0;
 
     /// <summary>
-    /// The life of a plane: <see cref="PlaneLife.Flying"/> while alive; downed, it is
-    /// <see cref="PlaneLife.Falling"/> until it is within <see cref="GroundContact"/> of the
-    /// ground (World's <c>GroundY</c>) or has stopped, then <see cref="PlaneLife.Crashed"/>.
+    /// The life of a plane at <paramref name="position"/>: <see cref="PlaneLife.Flying"/> while
+    /// alive; downed, it is <see cref="PlaneLife.Falling"/> until it is within
+    /// <see cref="GroundContact"/> of the ground under it (World's <c>Terrain.HeightAt</c>: a
+    /// hill, a mountain or the water's surface; or below it) or has stopped, then <see cref="PlaneLife.Crashed"/>.
     /// </summary>
-    public static PlaneLife Life(bool alive, float height, float speed)
+    public static PlaneLife Life(bool alive, Vector3 position, float speed)
     {
         if (alive)
             return PlaneLife.Flying;
-        return height <= WorldBounds.GroundY + GroundContact || speed <= StoppedSpeed ? PlaneLife.Crashed : PlaneLife.Falling;
+        float ground = Terrain.HeightAt(position.X, position.Z);
+        return position.Y <= ground + GroundContact || speed <= StoppedSpeed ? PlaneLife.Crashed : PlaneLife.Falling;
     }
+
+    /// <summary>How a crash at (<paramref name="x"/>, <paramref name="z"/>) shows: a splash on the river or a lake, else the fire explosion.</summary>
+    public static CrashLook CrashAt(float x, float z) => Terrain.IsWater(x, z) ? CrashLook.Splash : CrashLook.Explosion;
+
+    /// <summary>Where a crash at <paramref name="position"/> shows: on the ground (or water) right under or over it.</summary>
+    public static Vector3 CrashPoint(Vector3 position) =>
+        new(position.X, Terrain.HeightAt(position.X, position.Z), position.Z);
 }
