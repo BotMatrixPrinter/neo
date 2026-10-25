@@ -4,11 +4,12 @@ namespace Neo.Input;
 
 /// <summary>
 /// Flies the plane from a gamepad: maps a <see cref="PadState"/> to pitch, roll, yaw,
-/// throttle, fire and repair. Left stick up/down = pitch (back = nose up), left stick left/right =
-/// yaw, right stick left/right = roll; X/Square throttle up, B/Circle throttle down; right
-/// trigger past half way or A/Cross fires; Y/Triangle held = repair. Every stick axis goes through
+/// throttle, fire and repair. Right stick up/down = pitch (back = nose up), right stick left/right =
+/// roll; left stick up/down = throttle rate (up raises, down lowers, as <see cref="DeviceState.ThrottleUp"/>
+/// / <see cref="DeviceState.ThrottleDown"/>; released = throttle holds), left stick left/right = yaw;
+/// right trigger past half way or A/Cross fires; Y/Triangle held = repair. Every stick axis goes through
 /// <see cref="Stick"/>: a small <see cref="Deadzone"/>, then proportional to how far it is pushed.
-/// Right stick up/down and the left trigger do nothing for now.
+/// X/Square, B/Circle and the left trigger do nothing for now.
 /// </summary>
 public static class GamepadFlight
 {
@@ -28,14 +29,18 @@ public static class GamepadFlight
     public const float TriggerFire = 0.5f;
 
     /// <summary>The controls for <paramref name="pad"/> (unsmoothed: the stick is analog).</summary>
-    public static DeviceState Map(in PadState pad) => new(
-        Stick(pad.LeftY),
-        Stick(pad.RightX),
-        Stick(pad.LeftX),
-        pad.X ? 1f : 0f,
-        pad.B ? 1f : 0f,
-        pad.A || DeadZone(pad.RightTrigger) > TriggerFire,
-        pad.Y);
+    public static DeviceState Map(in PadState pad)
+    {
+        var throttle = -Stick(pad.LeftY); // stick up (-Y) = throttle up
+        return new(
+            Stick(pad.RightY),
+            Stick(pad.RightX),
+            Stick(pad.LeftX),
+            throttle > 0 ? throttle : 0f,
+            throttle < 0 ? -throttle : 0f,
+            pad.A || DeadZone(pad.RightTrigger) > TriggerFire,
+            pad.Y);
+    }
 
     /// <summary>Whether any stick, trigger or button on <paramref name="pad"/> is touched (past the dead zone).</summary>
     public static bool HasInput(in PadState pad) =>

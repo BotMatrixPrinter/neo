@@ -33,10 +33,10 @@ public readonly struct DeviceState
     /// <summary>-1..1, positive = yaw right.</summary>
     public float Yaw { get; }
 
-    /// <summary>0..1: how hard throttle-up is held (Shift key or X/Square = 1).</summary>
+    /// <summary>0..1: how hard throttle-up is held (Shift key = 1; gamepad: how far the left stick is pushed up).</summary>
     public float ThrottleUp { get; }
 
-    /// <summary>0..1: how hard throttle-down is held (Ctrl key or B/Circle = 1).</summary>
+    /// <summary>0..1: how hard throttle-down is held (Ctrl key = 1; gamepad: how far the left stick is pulled down).</summary>
     public float ThrottleDown { get; }
 
     public bool Fire { get; }

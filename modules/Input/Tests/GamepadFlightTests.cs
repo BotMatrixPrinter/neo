@@ -1,3 +1,4 @@
+using System;
 using Xunit;
 
 namespace Neo.Input.Tests;
@@ -5,13 +6,49 @@ namespace Neo.Input.Tests;
 public class GamepadFlightTests
 {
     [Fact]
-    public void LeftStickUpDownIsPitchBackIsNoseUp()
+    public void RightStickUpDownIsPitchBackIsNoseUp()
     {
-        Assert.Equal(1f, GamepadFlight.Map(new PadState { LeftY = 1f }).Pitch); // back = nose up
-        Assert.Equal(GamepadFlight.Stick(-0.6f), GamepadFlight.Map(new PadState { LeftY = -0.6f }).Pitch);
-        var state = GamepadFlight.Map(new PadState { LeftY = 0.8f });
-        Assert.Equal(0f, state.Roll);
-        Assert.Equal(0f, state.Yaw);
+        Assert.Equal(1f, GamepadFlight.Map(new PadState { RightY = 1f }).Pitch); // back = nose up
+        Assert.Equal(-1f, GamepadFlight.Map(new PadState { RightY = -1f }).Pitch); // forward = nose down
+        Assert.Equal(GamepadFlight.Stick(-0.6f), GamepadFlight.Map(new PadState { RightY = -0.6f }).Pitch);
+        Assert.True(GamepadFlight.Map(new PadState { RightY = 0.3f }).Pitch > 0f);
+        Assert.True(GamepadFlight.Map(new PadState { RightY = -0.3f }).Pitch < 0f);
+        var state = GamepadFlight.Map(new PadState { RightY = 0.8f });
+        Assert.Equal(new DeviceState(GamepadFlight.Stick(0.8f), 0, 0, 0, 0, false), state); // pitch only
+    }
+
+    [Theory]
+    [InlineData(1f)]
+    [InlineData(-1f)]
+    [InlineData(0.5f)]
+    [InlineData(-0.05f)]
+    public void LeftStickUpDownDoesNotPitch(float raw)
+    {
+        Assert.Equal(0f, GamepadFlight.Map(new PadState { LeftY = raw }).Pitch);
+        Assert.Equal(0f, GamepadFlight.Map(new PadState { LeftY = raw }).Roll);
+        Assert.Equal(0f, GamepadFlight.Map(new PadState { LeftY = raw }).Yaw);
+        Assert.Equal(GamepadFlight.Stick(0.7f), GamepadFlight.Map(new PadState { LeftY = raw, RightY = 0.7f }).Pitch);
+    }
+
+    [Theory]
+    [InlineData(-1f, 1f, 0f)] // full push up = full throttle up
+    [InlineData(1f, 0f, 1f)] // full pull down = full throttle down
+    [InlineData(-0.5f, 0.4792f, 0f)] // half push: about half rate
+    [InlineData(0.5f, 0f, 0.4792f)]
+    [InlineData(-0.05f, 0.0104f, 0f)] // a small push: slowly
+    [InlineData(0.05f, 0f, 0.0104f)]
+    [InlineData(-1.3f, 1f, 0f)] // over-range clamps
+    [InlineData(0f, 0f, 0f)] // released: no change
+    [InlineData(0.04f, 0f, 0f)] // inside the dead zone
+    [InlineData(-0.03f, 0f, 0f)]
+    [InlineData(float.NaN, 0f, 0f)]
+    public void LeftStickUpDownIsThrottleRate(float raw, float up, float down)
+    {
+        var state = GamepadFlight.Map(new PadState { LeftY = raw });
+        Assert.Equal(up, state.ThrottleUp, 3);
+        Assert.Equal(down, state.ThrottleDown, 3);
+        Assert.Equal(MathF.Abs(GamepadFlight.Stick(raw)), state.ThrottleUp + state.ThrottleDown);
+        Assert.True(state.ThrottleUp == 0f || state.ThrottleDown == 0f);
     }
 
     [Fact]
@@ -36,27 +73,18 @@ public class GamepadFlightTests
     }
 
     [Fact]
-    public void RightStickUpDownAndLeftTriggerDoNothing()
+    public void XBAndLeftTriggerDoNothing()
     {
-        foreach (var pad in new[] { new PadState { RightY = 1f }, new PadState { RightY = -1f }, new PadState { LeftTrigger = 1f } })
+        var pads = new[]
+        {
+            new PadState { X = true }, new PadState { B = true }, new PadState { X = true, B = true }, new PadState { LeftTrigger = 1f },
+        };
+        foreach (var pad in pads)
         {
             var state = GamepadFlight.Map(pad);
-            Assert.Equal(default(DeviceState), state);
+            Assert.Equal(default(DeviceState), state); // no throttle change, nothing else
             Assert.True(GamepadFlight.HasInput(pad)); // still switches to the pad
         }
-    }
-
-    [Fact]
-    public void XAndBAreThrottleUpAndDown()
-    {
-        var up = GamepadFlight.Map(new PadState { X = true });
-        Assert.Equal(1f, up.ThrottleUp);
-        Assert.Equal(0f, up.ThrottleDown);
-        Assert.False(up.Fire);
-        var down = GamepadFlight.Map(new PadState { B = true });
-        Assert.Equal(0f, down.ThrottleUp);
-        Assert.Equal(1f, down.ThrottleDown);
-        Assert.False(down.Fire);
     }
 
     [Fact]
@@ -68,7 +96,7 @@ public class GamepadFlightTests
         Assert.False(GamepadFlight.Map(new PadState { A = true, X = true, B = true, RightTrigger = 1f }).Repair);
         Assert.False(GamepadFlight.Map(default).Repair);
         // Held with the sticks: the axes still come through (Flight decides to ignore them).
-        var flying = GamepadFlight.Map(new PadState { Y = true, LeftY = 0.8f, X = true });
+        var flying = GamepadFlight.Map(new PadState { Y = true, RightY = 0.8f, LeftY = -1f });
         Assert.True(flying.Repair);
         Assert.Equal(GamepadFlight.Stick(0.8f), flying.Pitch);
         Assert.Equal(1f, flying.ThrottleUp);
@@ -109,9 +137,11 @@ public class GamepadFlightTests
     public void StickIsProportionalToHowFarItIsPushed(float raw, float expected)
     {
         Assert.Equal(expected, GamepadFlight.Stick(raw), 3);
-        Assert.Equal(GamepadFlight.Stick(raw), GamepadFlight.Map(new PadState { LeftY = raw }).Pitch);
+        Assert.Equal(GamepadFlight.Stick(raw), GamepadFlight.Map(new PadState { RightY = raw }).Pitch);
         Assert.Equal(GamepadFlight.Stick(raw), GamepadFlight.Map(new PadState { LeftX = raw }).Yaw);
         Assert.Equal(GamepadFlight.Stick(raw), GamepadFlight.Map(new PadState { RightX = raw }).Roll);
+        var throttle = GamepadFlight.Map(new PadState { LeftY = raw });
+        Assert.Equal(-GamepadFlight.Stick(raw), throttle.ThrottleUp - throttle.ThrottleDown);
     }
 
     [Theory]
@@ -122,7 +152,7 @@ public class GamepadFlightTests
     public void FullDeflectionIsExactlyOne(float raw, float expected)
     {
         Assert.Equal(expected, GamepadFlight.Stick(raw));
-        Assert.Equal(expected, GamepadFlight.Map(new PadState { LeftY = raw }).Pitch);
+        Assert.Equal(expected, GamepadFlight.Map(new PadState { RightY = raw }).Pitch);
         Assert.Equal(expected, GamepadFlight.Map(new PadState { LeftX = raw }).Yaw);
         Assert.Equal(expected, GamepadFlight.Map(new PadState { RightX = raw }).Roll);
     }

@@ -31,19 +31,21 @@ trigger or button switches to it, and the first of up to 4 pads with input is re
 
 | Control | Does |
 |---|---|
-| Left stick up / down | Pitch (pull back = nose up) |
+| Left stick up / down | Throttle up / down, as a rate (full push = 0.5 per second like Shift / Ctrl, a small push slowly; released, the throttle stays where it is) |
 | Left stick left / right | Yaw (rudder) |
+| Right stick up / down | Pitch (pull back = nose up, push forward = nose down) |
 | Right stick left / right | Roll |
-| Right stick up / down | Nothing for now |
-| X (Xbox) / Square (PlayStation) | Throttle up (held, same rate as Shift) |
-| B (Xbox) / Circle (PlayStation) | Throttle down (held, same rate as Ctrl) |
+| X (Xbox) / Square (PlayStation) | Nothing for now |
+| B (Xbox) / Circle (PlayStation) | Nothing for now |
 | Right trigger past half way | Fire |
 | A (Xbox) / Cross (PlayStation) | Also fires |
 | Y (Xbox) / Triangle (PlayStation) | Repair (held; `ControlInput.Repair` true on every tick it is down) |
 | Left trigger | Nothing for now |
 
 The sticks are proportional: how far a stick is pushed is how hard the plane turns (5% right
-is a small adjustment, 100% a hard right). `GamepadFlight.Stick` gives each stick axis a small
+is a small adjustment, 100% a hard right), and for the left stick's up/down how fast the
+throttle moves (`GamepadFlight.Map` puts the push up in `ThrottleUp`, the pull down in
+`ThrottleDown`, 0..1, and `InputModule` moves the throttle by them as it does for Shift / Ctrl). `GamepadFlight.Stick` gives each stick axis a small
 dead zone (`GamepadFlight.Deadzone`, 0.04, just enough to ignore stick drift), then rescales
 so the output starts at 0 right at the dead zone edge and grows to exactly 1 at full
 deflection: `sign(v) * ((|v| - 0.04) / 0.96) ^ ResponseExponent`, clamped to -1..1 (5% gives
@@ -77,10 +79,10 @@ the plane.
   every frame and hands them to the Core; its exported `InvertPitch` sets the Core's.
 - **Tests** (`Tests/`): `ControlInputTests` (ranges, clamping, aim normalization, no-aim, `Repair` default and set),
   `KeyboardFlightTests` (each key's mapping, invert, throttle, fire and repair keys, smoothing: ramp,
-  faster return, taps, reversing), `GamepadFlightTests` (each stick axis, buttons,
-  triggers, fire, Y repair, the dead zone and proportional response on every stick axis: 0 inside,
+  faster return, taps, reversing), `GamepadFlightTests` (each stick axis: right stick up/down pitch and left stick not,
+  left stick up/down throttle rate, X/B and the left trigger do nothing, triggers, fire, Y repair, the dead zone and proportional response on every stick axis: 0 inside,
 continuous at the edge, linear, exactly ±1 at full deflection, 5%/50%/100% examples, non-finite = 0; what counts as touching the pad), `InputModuleTests` (one message per tick for plane 0,
-  throttle start/smoothing/clamping, R and Y publish `Repair` every held tick with throttle still working, pad X/B throttle and sticks, keys fly the plane, `HasAim` false on keyboard and pad,
+  throttle start/smoothing/clamping, R and Y publish `Repair` every held tick with throttle still working, pad left stick throttle rate (full push = `ThrottleRate` per second, proportional, holds when released, clamped), X/B leave the throttle unchanged, right stick pitch, keys fly the plane, `HasAim` false on keyboard and pad,
   invert setting, latest state wins), with a fake bus.
 
 Test it alone: `./test.sh Input`. The scene draws nothing, so it has no screenshot.

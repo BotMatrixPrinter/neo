@@ -277,20 +277,63 @@ public class InputModuleTests
     }
 
     [Fact]
-    public void PadXAndBMoveThrottleLikeShiftAndCtrl()
+    public void PadLeftStickUpDownMovesThrottleAtARateAndCenterHoldsIt()
+    {
+        var input = new InputModule();
+        input.Start(new FakeBus());
+        input.SetState(GamepadFlight.Map(new PadState { LeftY = -1f })); // full push up
+        Run(input, 30); // 0.5 s at ThrottleRate
+        Assert.Equal(InputModule.StartThrottle + 0.5f * InputModule.ThrottleRate, input.Throttle, 4);
+        Assert.Equal(0.95f, input.Throttle, 4);
+        input.SetState(GamepadFlight.Map(default)); // released: holds
+        Run(input, 120);
+        Assert.Equal(0.95f, input.Throttle, 4);
+        Assert.Equal(0.95f, input.Last.Throttle, 4);
+        input.SetState(GamepadFlight.Map(new PadState { LeftY = 1f })); // full pull down
+        Run(input, 60); // 1 s
+        Assert.Equal(0.45f, input.Throttle, 4);
+        input.SetState(GamepadFlight.Map(new PadState { LeftY = 0.03f })); // back in the dead zone: holds
+        Run(input, 60);
+        Assert.Equal(0.45f, input.Throttle, 4);
+        // Half push: proportional rate, Stick(0.5) * ThrottleRate per second.
+        input.SetState(GamepadFlight.Map(new PadState { LeftY = -0.5f }));
+        Run(input, 60);
+        Assert.Equal(0.45f + GamepadFlight.Stick(0.5f) * InputModule.ThrottleRate, input.Throttle, 4);
+        // A small push moves it slowly.
+        var before = input.Throttle;
+        input.SetState(GamepadFlight.Map(new PadState { LeftY = 0.05f }));
+        Run(input, 60);
+        Assert.Equal(before - GamepadFlight.Stick(0.05f) * InputModule.ThrottleRate, input.Throttle, 4);
+        Assert.InRange(before - input.Throttle, 0.001f, 0.01f);
+    }
+
+    [Fact]
+    public void PadThrottleClampsAtOneAndZero()
+    {
+        var input = new InputModule();
+        input.Start(new FakeBus());
+        input.SetState(GamepadFlight.Map(new PadState { LeftY = -1f }));
+        Run(input, 120);
+        Assert.Equal(1f, input.Throttle);
+        input.SetState(GamepadFlight.Map(new PadState { LeftY = 1f }));
+        Run(input, 180);
+        Assert.Equal(0f, input.Throttle);
+    }
+
+    [Fact]
+    public void PadXBAndTriggersLeaveThrottleUnchanged()
     {
         var input = new InputModule();
         input.Start(new FakeBus());
         input.SetState(GamepadFlight.Map(new PadState { X = true }));
-        Run(input, 30); // 0.5 s
-        Assert.Equal(0.95f, input.Throttle, 4);
+        Run(input, 60);
+        Assert.Equal(InputModule.StartThrottle, input.Throttle, 5);
         input.SetState(GamepadFlight.Map(new PadState { B = true }));
-        Run(input, 60); // 1 s
-        Assert.Equal(0.45f, input.Throttle, 4);
-        // The triggers no longer touch the throttle.
+        Run(input, 60);
+        Assert.Equal(InputModule.StartThrottle, input.Throttle, 5);
         input.SetState(GamepadFlight.Map(new PadState { LeftTrigger = 1f, RightTrigger = 1f }));
         Run(input, 60);
-        Assert.Equal(0.45f, input.Throttle, 4);
+        Assert.Equal(InputModule.StartThrottle, input.Throttle, 5);
         Assert.True(input.Last.Fire);
     }
 
@@ -316,7 +359,7 @@ public class InputModuleTests
         var bus = new FakeBus();
         var input = new InputModule();
         input.Start(bus);
-        input.SetState(GamepadFlight.Map(new PadState { Y = true, B = true }));
+        input.SetState(GamepadFlight.Map(new PadState { Y = true, LeftY = 1f }));
         Run(input, 20);
         for (int i = 0; i < 20; i++)
             Assert.True(Only(bus, i).Repair);
@@ -333,14 +376,22 @@ public class InputModuleTests
         var bus = new FakeBus();
         var input = new InputModule();
         input.Start(bus);
-        input.SetState(GamepadFlight.Map(new PadState { LeftY = 0.8f, LeftX = -0.6f, RightX = 0.4f, RightY = 1f }));
+        input.SetState(GamepadFlight.Map(new PadState { RightY = 0.8f, LeftX = -0.6f, RightX = 0.4f }));
         input.Tick(new TickContext(1, Step));
         var msg = Only(bus, 0);
-        Assert.Equal(GamepadFlight.Stick(0.8f), msg.Pitch);
+        Assert.Equal(GamepadFlight.Stick(0.8f), msg.Pitch); // right stick back = nose up
         Assert.Equal(GamepadFlight.Stick(-0.6f), msg.Yaw);
         Assert.Equal(GamepadFlight.Stick(0.4f), msg.Roll);
         Assert.Equal(0.375f, msg.Roll, 4); // (0.4 - 0.04) / 0.96: proportional, not raw
         Assert.False(msg.Fire);
+        Assert.Equal(InputModule.StartThrottle, msg.Throttle, 5);
+        // Right stick forward = nose down; the left stick does not pitch.
+        input.SetState(GamepadFlight.Map(new PadState { RightY = -1f, LeftY = 1f }));
+        input.Tick(new TickContext(2, Step));
+        Assert.Equal(-1f, Only(bus, 1).Pitch);
+        input.SetState(GamepadFlight.Map(new PadState { LeftY = -1f }));
+        input.Tick(new TickContext(3, Step));
+        Assert.Equal(0f, Only(bus, 2).Pitch);
     }
 
     [Fact]
