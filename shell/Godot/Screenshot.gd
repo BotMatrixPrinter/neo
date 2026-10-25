@@ -1,11 +1,15 @@
 # Used by screenshot.sh: godot --path . -s res://shell/Godot/Screenshot.gd -- <scene> <out.png> <frames>
 # Runs <scene> for <frames> frames, then saves the root viewport's last frame as a PNG.
+# Prints NEO_RENDERER <driver> <method> first (e.g. vulkan forward_plus): Godot itself may switch
+# from Vulkan to opengl3 when Vulkan fails to start.
 extends SceneTree
 
 var _out := ""
 var _frames := 0
 
 func _initialize() -> void:
+	print("NEO_RENDERER ", RenderingServer.get_current_rendering_driver_name(), " ",
+		RenderingServer.get_current_rendering_method())
 	var args := OS.get_cmdline_user_args()
 	if args.size() != 3:
 		printerr("usage: -- <scene> <out.png> <frames>")

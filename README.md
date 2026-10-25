@@ -67,9 +67,14 @@ could not reach nuget.org) a warning, so offline builds pass despite `TreatWarni
 
 ## Screenshots
 
-`./screenshot.sh [scene] [name]` builds the project, runs a scene for real (OpenGL under
-`xvfb-run`, Mesa software rendering, no GPU) for 120 frames (`FRAMES=n` to change) and
-saves the last frame as a 1920x1080 PNG, `<name>.png`. `scene` is a `res://` or repo path
+`./screenshot.sh [scene] [name]` builds the project, runs a scene for real under `xvfb-run`
+with Vulkan (`--rendering-driver vulkan`: the Forward+ renderer players see, volumetric fog
+and all; Mesa's software Vulkan, lavapipe, when there is no GPU) for 120 frames (`FRAMES=n` to
+change) and saves the last frame as a 1920x1080 PNG, `<name>.png`. Software Vulkan is slow
+(about 3 minutes for the main scene; it allows 10). Only if Vulkan fails to start (Godot
+crashes, or switches to OpenGL by itself) does it fall back to `opengl3` (the Compatibility
+renderer, without Forward+ features), and it says so in its output (`Vulkan failed to start`);
+otherwise it ends with `rendered with Vulkan`. `scene` is a `res://` or repo path
 of a `.tscn` (default: the main scene); `name` defaults to the module's name for a scene
 under `modules/<Name>/` (e.g. `HUD.png`), else to the scene's file name (`Main.png` for the
 main scene). It saves to `$SCREENSHOT_DIR` when set (job stages set it to

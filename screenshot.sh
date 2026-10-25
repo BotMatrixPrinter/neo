@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Screenshot of a scene, rendered for real (OpenGL under Xvfb, no GPU needed).
+# Screenshot of a scene, rendered for real under Xvfb, no GPU needed: Vulkan (Forward+, the renderer
+# players see; Mesa's lavapipe without a GPU), or opengl3 (Compatibility) only if Vulkan fails to start.
 #   ./screenshot.sh [-n] [scene] [name]
 #   scene  res:// path or repo path of a .tscn (default: the main scene)
 #   name   file name without .png (default: the module's name for modules/<Name>/..., else the
@@ -50,20 +51,42 @@ mkdir -p "$dir"
 # Keep Godot from importing local screenshots as project assets.
 [ -n "${SCREENSHOT_DIR:-}" ] || touch "$dir/.gdignore"
 out_abs="$(cd "$(dirname "$out")" && pwd)/$(basename "$out")"
-rm -f "$out_abs"
 
 echo "== build Godot project"
 dotnet build Neo.csproj --nologo -v q
 
-echo "== render $scene ($frames frames) -> $out"
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
-status=0
-timeout 120 xvfb-run -a -s "-screen 0 1920x1080x24" \
-  godot --path . --rendering-driver opengl3 --resolution 1920x1080 --fixed-fps 60 \
-  -s res://shell/Godot/Screenshot.gd -- "$scene" "$out_abs" "$frames" >"$log" 2>&1 || status=$?
-cat "$log"
-if [ "$status" -ne 0 ] || ! grep -q '^NEO_SCREENSHOT .* 1920x1080$' "$log" || [ ! -s "$out_abs" ]; then
-  echo "FAIL: no 1920x1080 screenshot (godot exited with $status)"; exit 1
-fi
+# render <driver> <timeout>: runs the scene once; sets status and renderer ("<driver> <method>" that
+# Godot really used, from Screenshot.gd's NEO_RENDERER line; empty if it never got that far).
+render() {
+  echo "== render $scene ($frames frames, $1) -> $out"
+  rm -f "$out_abs"
+  status=0
+  timeout "$2" xvfb-run -a -s "-screen 0 1920x1080x24" \
+    godot --path . --rendering-driver "$1" --resolution 1920x1080 --fixed-fps 60 \
+    -s res://shell/Godot/Screenshot.gd -- "$scene" "$out_abs" "$frames" >"$log" 2>&1 || status=$?
+  cat "$log"
+  renderer=$(sed -n 's/^NEO_RENDERER //p' "$log" | head -n 1)
+}
+saved() {
+  [ "$status" -eq 0 ] && grep -q '^NEO_SCREENSHOT .* 1920x1080$' "$log" && [ -s "$out_abs" ]
+}
+
+# Software Vulkan is slow: allow it longer.
+render vulkan 600
+case "$renderer" in
+  vulkan*)
+    saved || { echo "FAIL: no 1920x1080 screenshot with Vulkan (godot exited with $status)"; exit 1; }
+    echo "== rendered with Vulkan ($renderer)" ;;
+  opengl3*)
+    # Godot started, but switched to opengl3 by itself.
+    saved || { echo "FAIL: no 1920x1080 screenshot (godot exited with $status)"; exit 1; }
+    echo "== WARNING: Vulkan failed to start; Godot fell back to opengl3 ($renderer, Compatibility renderer: no Forward+ features)" ;;
+  *)
+    echo "== WARNING: Vulkan failed to start (godot exited with $status); falling back to opengl3 (Compatibility renderer: no Forward+ features)"
+    render opengl3 120
+    saved || { echo "FAIL: no 1920x1080 screenshot (godot exited with $status)"; exit 1; }
+    echo "== rendered with opengl3 ($renderer)" ;;
+esac
 echo "== saved $out"
